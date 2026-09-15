@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Wayfrost
+Comment=Windows 11 Text Extractor for Wayland Linux
+Exec=wayfrost
+Icon=edit-copy-symbolic
+Terminal=false
+Type=Application
+Categories=Utility;OCR;
+Keywords=Text;Extractor;OCR;Capture;Wayland;
