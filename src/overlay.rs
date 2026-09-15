@@ -9,7 +9,7 @@ use gtk4::{
     Align, Box, Button, CssProvider, DrawingArea, EventControllerKey, EventControllerMotion,
     GestureDrag, Image, Orientation, Overlay, Picture, Popover, Separator,
 };
-use image::{DynamicImage, GenericImageView};
+use image::{imageops, DynamicImage, GenericImageView};
 use libadwaita as adw;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -42,6 +42,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     // State management: Persistent selection frame & text selection
     let locked_region: Rc<RefCell<Option<(f64, f64, f64, f64)>>> = Rc::new(RefCell::new(None));
     let framing_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
+    let text_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
     let active_lang = Rc::new(RefCell::new("TR".to_string()));
     let cached_text: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
@@ -51,7 +52,7 @@ pub fn build_overlay_window(app: &adw::Application) {
 
     let root_overlay = Overlay::new();
 
-    // 1. GPU-accelerated background picture
+    // 1. GPU-accelerated background picture (avoids 100% CPU Cairo redraw on every mouse frame!)
     let bg_picture = Picture::new();
     bg_picture.set_hexpand(true);
     bg_picture.set_vexpand(true);
@@ -105,13 +106,32 @@ pub fn build_overlay_window(app: &adw::Application) {
             let w = width as f64;
             let h = height as f64;
 
-            let f_drag = { *framing_drag.borrow() };
-            let locked = { *locked_region.borrow() };
+            let f_drag = *framing_drag.borrow();
+            let locked = *locked_region.borrow();
             let words = all_words.borrow();
-            let selected = { selected_indices.borrow().clone() };
+            let selected = selected_indices.borrow();
 
             // 1. Framing Drag or Persistent Locked Region Dimming
-            if let Some((rx, ry, rw, rh)) = locked {
+            if let Some((start, curr)) = f_drag {
+                let sx = start.0.min(curr.0);
+                let sy = start.1.min(curr.1);
+                let sw = (start.0 - curr.0).abs();
+                let sh = (start.1 - curr.1).abs();
+
+                // Dim unselected area
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
+                cr.rectangle(0.0, 0.0, w, sy);
+                cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
+                cr.rectangle(0.0, sy, sx, sh);
+                cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
+                let _ = cr.fill();
+
+                // Crisp accent frame border during active drag
+                cr.set_source_rgba(ar, ag, ab, 0.85);
+                cr.set_line_width(1.5);
+                cr.rectangle(sx, sy, sw, sh);
+                let _ = cr.stroke();
+            } else if let Some((rx, ry, rw, rh)) = locked {
                 // PERSISTENT SELECTION RECTANGLE!
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.38);
                 cr.rectangle(0.0, 0.0, w, ry);
@@ -150,29 +170,6 @@ pub fn build_overlay_window(app: &adw::Application) {
                 cr.line_to(rx + rw, ry + rh);
                 cr.line_to(rx + rw, ry + rh - corner_len);
                 let _ = cr.stroke();
-            } else if let Some((start, curr)) = f_drag {
-                let sx = start.0.min(curr.0);
-                let sy = start.1.min(curr.1);
-                let sw = (start.0 - curr.0).abs();
-                let sh = (start.1 - curr.1).abs();
-
-                if sw >= 4.0 && sh >= 4.0 {
-                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
-                    cr.rectangle(0.0, 0.0, w, sy);
-                    cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
-                    cr.rectangle(0.0, sy, sx, sh);
-                    cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
-                    let _ = cr.fill();
-
-                    cr.set_source_rgba(ar, ag, ab, 0.85);
-                    cr.set_line_width(1.5);
-                    cr.rectangle(sx, sy, sw, sh);
-                    let _ = cr.stroke();
-                } else {
-                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.22);
-                    cr.rectangle(0.0, 0.0, w, h);
-                    let _ = cr.fill();
-                }
             } else {
                 // Initial subtle scrim before region is selected
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.22);
@@ -191,7 +188,6 @@ pub fn build_overlay_window(app: &adw::Application) {
                     let _ = cr.stroke();
                 }
             }
-            drop(words);
         });
     }
     root_overlay.add_overlay(&drawing_area);
@@ -205,8 +201,7 @@ pub fn build_overlay_window(app: &adw::Application) {
         let rx = Rc::clone(&rx);
 
         glib::timeout_add_local(std::time::Duration::from_millis(25), move || {
-            let received = { rx.borrow_mut().try_recv().ok() };
-            if let Some(words) = received {
+            if let Ok(words) = rx.borrow_mut().try_recv() {
                 *all_words.borrow_mut() = words;
                 da.queue_draw();
                 glib::ControlFlow::Break
@@ -218,7 +213,7 @@ pub fn build_overlay_window(app: &adw::Application) {
 
     if let Some(ref img_arc) = screen_img {
         let img = Arc::clone(img_arc);
-        let lang = { active_lang.borrow().clone() };
+        let lang = active_lang.borrow().clone();
 
         std::thread::spawn(move || {
             if let Ok(words) = pipeline::run_tesseract_tsv(&img, &lang) {
@@ -233,38 +228,44 @@ pub fn build_overlay_window(app: &adw::Application) {
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let locked_region = Rc::clone(&locked_region);
+        let screen_img = screen_img.clone();
+        let active_lang = Rc::clone(&active_lang);
         let window_weak = window.downgrade();
 
         move || {
-            let mut text = { cached_text.borrow().clone().unwrap_or_default() };
+            let mut text = cached_text.borrow().clone().unwrap_or_default();
             if text.trim().is_empty() {
-                let locked = { *locked_region.borrow() };
-                let selected = { selected_indices.borrow().clone() };
                 let words = all_words.borrow();
-
+                let selected = selected_indices.borrow();
                 let sel_words: Vec<&DetectedWord> = selected.iter().filter_map(|&i| words.get(i)).collect();
                 if !sel_words.is_empty() {
                     text = pipeline::join_words(&sel_words);
-                } else if let Some((rx, ry, rw, rh)) = locked {
-                    // Copy all words inside persistent selection frame in true reading order
-                    let candidates: Vec<usize> = (0..words.len())
-                        .filter(|&i| {
-                            let w = &words[i];
-                            !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
-                        })
+                } else if let Some((rx, ry, rw, rh)) = *locked_region.borrow() {
+                    // Copy all words inside persistent selection frame
+                    let region_words: Vec<&DetectedWord> = words
+                        .iter()
+                        .filter(|w| !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh))
                         .collect();
-                    let lines = pipeline::cluster_words_into_lines(&words, &candidates);
-                    let ordered: Vec<&DetectedWord> = lines.into_iter().flatten().filter_map(|i| words.get(i)).collect();
-                    if !ordered.is_empty() {
-                        text = pipeline::join_words(&ordered);
+                    if !region_words.is_empty() {
+                        text = pipeline::join_words(&region_words);
+                    } else if let Some(ref img) = screen_img {
+                        let (img_w, img_h) = img.dimensions();
+                        let crop_x = (rx.round() as u32).min(img_w.saturating_sub(1));
+                        let crop_y = (ry.round() as u32).min(img_h.saturating_sub(1));
+                        let crop_w = (rw.round() as u32).min(img_w - crop_x).max(1);
+                        let crop_h = (rh.round() as u32).min(img_h - crop_y).max(1);
+
+                        let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
+                        let lang = active_lang.borrow().clone();
+                        let crop_dyn = DynamicImage::ImageRgba8(crop);
+                        if let Ok(crop_words) = pipeline::run_tesseract_tsv(&crop_dyn, &lang) {
+                            let refs: Vec<&DetectedWord> = crop_words.iter().collect();
+                            text = pipeline::join_words(&refs);
+                        }
                     }
                 } else if !words.is_empty() {
-                    let candidates: Vec<usize> = (0..words.len()).collect();
-                    let lines = pipeline::cluster_words_into_lines(&words, &candidates);
-                    let ordered: Vec<&DetectedWord> = lines.into_iter().flatten().filter_map(|i| words.get(i)).collect();
-                    text = pipeline::join_words(&ordered);
+                    text = pipeline::join_words(&words.iter().collect::<Vec<_>>());
                 }
-                drop(words);
             }
 
             let trimmed = text.trim();
@@ -287,7 +288,6 @@ pub fn build_overlay_window(app: &adw::Application) {
     };
 
     // --- Helper function: Schedule floating tooltip at mouse release offset in 0.20s (200ms) ---
-    // User requested offset: y - 36, x + 8
     let schedule_copy_tooltip = {
         let copy_timer = Rc::clone(&copy_timer);
         let floating_copy_btn = floating_copy_btn.clone();
@@ -301,31 +301,26 @@ pub fn build_overlay_window(app: &adw::Application) {
 
             let btn_clone = floating_copy_btn.clone();
             let copy_timer_clone = Rc::clone(&copy_timer);
-            let da_clone = da.clone();
+            let da_w = da.width() as f64;
+            let da_h = da.height() as f64;
+            let btn_size = 40.0;
+
+            let mut btn_x = mouse_x + 8.0;
+            let mut btn_y = mouse_y - 36.0;
+
+            if btn_x + btn_size > da_w - 12.0 {
+                btn_x = (mouse_x - btn_size - 8.0).max(12.0);
+            }
+            if btn_y < 12.0 {
+                btn_y = (mouse_y + 16.0).min(da_h - btn_size - 12.0);
+            }
+
+            let final_x = btn_x.clamp(12.0, (da_w - btn_size - 12.0).max(12.0));
+            let final_y = btn_y.clamp(12.0, (da_h - btn_size - 12.0).max(12.0));
 
             // 0.20s (200ms) response time as requested
             let source_id = glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || {
                 copy_timer_clone.borrow_mut().take();
-
-                let w = (da_clone.width() as f64).max(1920.0);
-                let h = (da_clone.height() as f64).max(1080.0);
-                let btn_size = 40.0;
-
-                // User requested exact offset: y - 36, x + 8
-                let mut btn_x = mouse_x + 8.0;
-                let mut btn_y = mouse_y - 36.0;
-
-                // Flip if overflow screen edges
-                if btn_x + btn_size > w - 12.0 {
-                    btn_x = (mouse_x - btn_size - 8.0).max(12.0);
-                }
-                if btn_y < 12.0 {
-                    btn_y = (mouse_y + 16.0).min(h - btn_size - 12.0);
-                }
-
-                let final_x = btn_x.clamp(12.0, (w - btn_size - 12.0).max(12.0));
-                let final_y = btn_y.clamp(12.0, (h - btn_size - 12.0).max(12.0));
-
                 btn_clone.set_margin_start(final_x as i32);
                 btn_clone.set_margin_top(final_y as i32);
                 btn_clone.set_visible(true);
@@ -334,12 +329,12 @@ pub fn build_overlay_window(app: &adw::Application) {
         }
     };
 
-    // --- Mouse Drag Gestures: Persistent Selection Rectangle + Direct Text Selection ---
+    // --- Mouse Drag Gestures: Persistent Selection Rectangle + Text Selection ---
     let gesture_drag = GestureDrag::new();
     {
         let locked_region = Rc::clone(&locked_region);
         let framing_drag = Rc::clone(&framing_drag);
-        let all_words = Rc::clone(&all_words);
+        let text_drag = Rc::clone(&text_drag);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
         let copy_timer = Rc::clone(&copy_timer);
@@ -352,38 +347,27 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
             floating_copy_btn.set_visible(false);
 
-            let current_locked = { *locked_region.borrow() };
-            if let Some((rx, ry, rw, rh)) = current_locked {
-                let inside = start_x >= rx - 8.0 && start_x <= rx + rw + 8.0
-                    && start_y >= ry - 8.0 && start_y <= ry + rh + 8.0;
-                if inside {
-                    // Interaction INSIDE persistent frame
-                    *framing_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
-                    let clicked_word = {
-                        let words = all_words.borrow();
-                        words.iter().position(|w| {
-                            w.x + w.w >= rx && w.x <= rx + rw && w.y + w.h >= ry && w.y <= ry + rh
-                                && start_x >= w.x - 6.0 && start_x <= w.x + w.w + 6.0
-                                && start_y >= w.y - 6.0 && start_y <= w.y + w.h + 6.0
-                        })
-                    };
-                    if let Some(idx) = clicked_word {
-                        *selected_indices.borrow_mut() = vec![idx];
-                    } else {
-                        selected_indices.borrow_mut().clear();
-                    }
-                } else {
-                    // Click OUTSIDE persistent frame: dismiss frame
-                    *locked_region.borrow_mut() = None;
-                    selected_indices.borrow_mut().clear();
-                    *framing_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
-                }
+            let current_locked = *locked_region.borrow();
+            let is_inside_locked = if let Some((rx, ry, rw, rh)) = current_locked {
+                start_x >= rx && start_x <= rx + rw && start_y >= ry && start_y <= ry + rh
             } else {
-                // No active frame: start new selection framing drag
+                false
+            };
+
+            if is_inside_locked {
+                // Dragging INSIDE the persistent selection rectangle -> Text Selection
+                *text_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
+                *framing_drag.borrow_mut() = None;
                 selected_indices.borrow_mut().clear();
+                *cached_text.borrow_mut() = None;
+            } else {
+                // Dragging OUTSIDE or when no region locked -> New Selection Rectangle framing
+                *locked_region.borrow_mut() = None;
+                *text_drag.borrow_mut() = None;
                 *framing_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
+                selected_indices.borrow_mut().clear();
+                *cached_text.borrow_mut() = None;
             }
-            *cached_text.borrow_mut() = None;
             da.queue_draw();
         });
     }
@@ -391,34 +375,50 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let locked_region = Rc::clone(&locked_region);
         let framing_drag = Rc::clone(&framing_drag);
+        let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let da = drawing_area.clone();
 
         gesture_drag.connect_drag_update(move |_, offset_x, offset_y| {
-            let start_opt = { framing_drag.borrow().map(|(start, _)| start) };
-            if let Some(start) = start_opt {
+            let t_start_opt = text_drag.borrow().map(|(start, _)| start);
+            if let Some(start) = t_start_opt {
                 let current = (start.0 + offset_x, start.1 + offset_y);
-                *framing_drag.borrow_mut() = Some((start, current));
+                *text_drag.borrow_mut() = Some((start, current));
 
-                let locked = { *locked_region.borrow() };
-                if let Some((rx, ry, rw, rh)) = locked {
-                    // Dragging INSIDE persistent frame: select words swept by drag
-                    let words = all_words.borrow();
-                    let candidates: Vec<usize> = (0..words.len())
-                        .filter(|&i| {
-                            let w = &words[i];
-                            !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
-                        })
-                        .collect();
+                let min_x = start.0.min(current.0);
+                let max_x = start.0.max(current.0);
+                let min_y = start.1.min(current.1) - 4.0;
+                let max_y = start.1.max(current.1) + 4.0;
 
-                    let new_sel = pipeline::select_in_drag(start, current, &words, &candidates);
-                    let changed = { selected_indices.borrow().as_slice() != new_sel.as_slice() };
-                    if changed {
-                        *selected_indices.borrow_mut() = new_sel;
+                let words = all_words.borrow();
+                let locked = *locked_region.borrow();
+                let mut new_sel = Vec::new();
+                for (i, w) in words.iter().enumerate() {
+                    if let Some((rx, ry, rw, rh)) = locked {
+                        if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
+                            continue;
+                        }
+                    }
+                    let (wx2, wy2) = (w.x + w.w, w.y + w.h);
+                    if !(wx2 < min_x || w.x > max_x || wy2 < min_y || w.y > max_y) {
+                        new_sel.push(i);
                     }
                 }
-                da.queue_draw();
+                drop(words);
+
+                // Only queue redraw when selection changes to prevent frame drops
+                if *selected_indices.borrow() != new_sel {
+                    *selected_indices.borrow_mut() = new_sel;
+                    da.queue_draw();
+                }
+            } else {
+                let f_start_opt = framing_drag.borrow().map(|(start, _)| start);
+                if let Some(start) = f_start_opt {
+                    let current = (start.0 + offset_x, start.1 + offset_y);
+                    *framing_drag.borrow_mut() = Some((start, current));
+                    da.queue_draw();
+                }
             }
         });
     }
@@ -426,75 +426,95 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let locked_region = Rc::clone(&locked_region);
         let framing_drag = Rc::clone(&framing_drag);
+        let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
+        let screen_img = screen_img.clone();
+        let active_lang = Rc::clone(&active_lang);
         let da = drawing_area.clone();
         let schedule_tooltip = schedule_copy_tooltip.clone();
 
         gesture_drag.connect_drag_end(move |_, offset_x, offset_y| {
-            let drag_opt = { framing_drag.borrow_mut().take() };
-            if let Some((start, _)) = drag_opt {
+            if let Some((start, _)) = framing_drag.borrow_mut().take() {
                 let current = (start.0 + offset_x, start.1 + offset_y);
                 let sx = start.0.min(current.0);
                 let sy = start.1.min(current.1);
                 let sw = (start.0 - current.0).abs();
                 let sh = (start.1 - current.1).abs();
 
-                let current_locked = { *locked_region.borrow() };
-                if let Some((rx, ry, rw, rh)) = current_locked {
-                    // Inside persistent frame interaction
-                    let has_selected = { !selected_indices.borrow().is_empty() };
-                    let words = all_words.borrow();
-                    if has_selected {
-                        let selected = selected_indices.borrow();
-                        let sel_words: Vec<&DetectedWord> =
-                            selected.iter().filter_map(|&i| words.get(i)).collect();
-                        if !sel_words.is_empty() {
-                            *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
-                        }
-                    } else {
-                        let candidates: Vec<usize> = (0..words.len())
-                            .filter(|&i| {
-                                let w = &words[i];
-                                !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
-                            })
-                            .collect();
-                        let lines = pipeline::cluster_words_into_lines(&words, &candidates);
-                        let ordered: Vec<&DetectedWord> =
-                            lines.into_iter().flatten().filter_map(|i| words.get(i)).collect();
-                        if !ordered.is_empty() {
-                            *cached_text.borrow_mut() = Some(pipeline::join_words(&ordered));
+                if sw >= 8.0 && sh >= 8.0 {
+                    // PERSISTENT SELECTION RECTANGLE!
+                    *locked_region.borrow_mut() = Some((sx, sy, sw, sh));
+
+                    if let Some(ref img) = screen_img {
+                        let (img_w, img_h) = img.dimensions();
+                        let crop_x = (sx.round() as u32).min(img_w.saturating_sub(1));
+                        let crop_y = (sy.round() as u32).min(img_h.saturating_sub(1));
+                        let crop_w = (sw.round() as u32).min(img_w - crop_x).max(1);
+                        let crop_h = (sh.round() as u32).min(img_h - crop_y).max(1);
+
+                        let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
+                        let lang = active_lang.borrow().clone();
+                        let crop_dyn = DynamicImage::ImageRgba8(crop);
+
+                        if let Ok(mut crop_words) = pipeline::run_tesseract_tsv(&crop_dyn, &lang) {
+                            for w in &mut crop_words {
+                                w.x += crop_x as f64;
+                                w.y += crop_y as f64;
+                            }
+                            let refs: Vec<&DetectedWord> = crop_words.iter().collect();
+                            *cached_text.borrow_mut() = Some(pipeline::join_words(&refs));
+                            *all_words.borrow_mut() = crop_words;
                         }
                     }
-                    drop(words);
+
+                    selected_indices.borrow_mut().clear();
                     schedule_tooltip(current.0, current.1);
                 } else {
-                    // New Selection Rectangle framing
-                    if sw >= 12.0 && sh >= 12.0 {
-                        *locked_region.borrow_mut() = Some((sx, sy, sw, sh));
-                        let words = all_words.borrow();
-                        let candidates: Vec<usize> = (0..words.len())
-                            .filter(|&i| {
-                                let w = &words[i];
-                                !(w.x + w.w < sx || w.x > sx + sw || w.y + w.h < sy || w.y > sy + sh)
-                            })
-                            .collect();
-                        let lines = pipeline::cluster_words_into_lines(&words, &candidates);
-                        let ordered: Vec<&DetectedWord> =
-                            lines.into_iter().flatten().filter_map(|i| words.get(i)).collect();
-                        if !ordered.is_empty() {
-                            *cached_text.borrow_mut() = Some(pipeline::join_words(&ordered));
+                    // Click outside without drag -> clear persistent region
+                    *locked_region.borrow_mut() = None;
+                    selected_indices.borrow_mut().clear();
+                    *cached_text.borrow_mut() = None;
+                }
+                da.queue_draw();
+            } else if let Some((start, _)) = text_drag.borrow_mut().take() {
+                let current = (start.0 + offset_x, start.1 + offset_y);
+                let sw = (start.0 - current.0).abs();
+                let sh = (start.1 - current.1).abs();
+
+                if sw < 4.0 && sh < 4.0 {
+                    // Single click inside region: select single word under cursor
+                    let words = all_words.borrow();
+                    let mut clicked_idx = None;
+                    for (i, w) in words.iter().enumerate() {
+                        if start.0 >= w.x - 2.0
+                            && start.0 <= w.x + w.w + 2.0
+                            && start.1 >= w.y - 2.0
+                            && start.1 <= w.y + w.h + 2.0
+                        {
+                            clicked_idx = Some(i);
+                            break;
                         }
-                        drop(words);
-                        schedule_tooltip(current.0, current.1);
-                    } else {
-                        // Click in empty space
-                        *locked_region.borrow_mut() = None;
-                        selected_indices.borrow_mut().clear();
-                        *cached_text.borrow_mut() = None;
+                    }
+                    if let Some(idx) = clicked_idx {
+                        *selected_indices.borrow_mut() = vec![idx];
                     }
                 }
+
+                // Cache selected text
+                {
+                    let words = all_words.borrow();
+                    let selected = selected_indices.borrow();
+                    let sel_words: Vec<&DetectedWord> =
+                        selected.iter().filter_map(|&i| words.get(i)).collect();
+                    if !sel_words.is_empty() {
+                        *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
+                    }
+                }
+
+                // Schedule floating copy tooltip directly at mouse release coordinates in 0.20s!
+                schedule_tooltip(current.0, current.1);
                 da.queue_draw();
             }
         });
@@ -506,38 +526,31 @@ pub fn build_overlay_window(app: &adw::Application) {
     let motion = EventControllerMotion::new();
     {
         let all_words = Rc::clone(&all_words);
-        let framing_drag = Rc::clone(&framing_drag);
-        let selected_indices = Rc::clone(&selected_indices);
+        let text_drag = Rc::clone(&text_drag);
         let locked_region = Rc::clone(&locked_region);
         let current_cursor = Rc::clone(&current_cursor);
         let window_weak = window.downgrade();
         motion.connect_motion(move |_, x, y| {
             if let Some(win) = window_weak.upgrade() {
-                let locked = { *locked_region.borrow() };
-                let is_inside_locked = if let Some((rx, ry, rw, rh)) = locked {
-                    x >= rx - 4.0 && x <= rx + rw + 4.0 && y >= ry - 4.0 && y <= ry + rh + 4.0
-                } else {
-                    false
-                };
                 let is_over_word = {
                     let words = all_words.borrow();
+                    let locked = *locked_region.borrow();
                     words.iter().any(|w| {
                         if let Some((rx, ry, rw, rh)) = locked {
                             if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
                                 return false;
                             }
                         }
-                        x >= w.x - 6.0 && x <= w.x + w.w + 6.0 && y >= w.y - 6.0 && y <= w.y + w.h + 6.0
+                        x >= w.x - 2.0 && x <= w.x + w.w + 2.0 && y >= w.y - 2.0 && y <= w.y + w.h + 2.0
                     })
                 };
-                let is_active_sel = { !selected_indices.borrow().is_empty() || framing_drag.borrow().is_some() };
-                let desired_cursor = if is_inside_locked || is_over_word || is_active_sel {
+                let is_text_dragging = text_drag.borrow().is_some();
+                let desired_cursor = if is_over_word || is_text_dragging {
                     "text"
                 } else {
                     "crosshair"
                 };
-                let need_update = { *current_cursor.borrow() != desired_cursor };
-                if need_update {
+                if *current_cursor.borrow() != desired_cursor {
                     *current_cursor.borrow_mut() = desired_cursor;
                     win.set_cursor_from_name(Some(desired_cursor));
                 }
@@ -577,31 +590,24 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
             floating_copy_btn.set_visible(false);
 
-            let locked = { *locked_region.borrow() };
-            let (all_idx, text_opt) = {
-                let words = all_words.borrow();
-                let candidates: Vec<usize> = if let Some((rx, ry, rw, rh)) = locked {
-                    (0..words.len())
-                        .filter(|&i| {
-                            let w = &words[i];
-                            !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
-                        })
-                        .collect()
-                } else {
-                    (0..words.len()).collect()
-                };
-                let lines = pipeline::cluster_words_into_lines(&words, &candidates);
-                let idxs: Vec<usize> = lines.into_iter().flatten().collect();
-                let sel_words: Vec<&DetectedWord> = idxs.iter().filter_map(|&i| words.get(i)).collect();
-                let txt = if !sel_words.is_empty() {
-                    Some(pipeline::join_words(&sel_words))
-                } else {
-                    None
-                };
-                (idxs, txt)
+            let words = all_words.borrow();
+            let locked = *locked_region.borrow();
+            let all_idx: Vec<usize> = if let Some((rx, ry, rw, rh)) = locked {
+                (0..words.len())
+                    .filter(|&i| {
+                        let w = &words[i];
+                        !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
+                    })
+                    .collect()
+            } else {
+                (0..words.len()).collect()
             };
 
-            *cached_text.borrow_mut() = text_opt;
+            let sel_words: Vec<&DetectedWord> = all_idx.iter().filter_map(|&i| words.get(i)).collect();
+            if !sel_words.is_empty() {
+                *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
+            }
+            drop(words);
             *selected_indices.borrow_mut() = all_idx;
             da.queue_draw();
         });
@@ -669,8 +675,7 @@ pub fn build_overlay_window(app: &adw::Application) {
         let da = drawing_area.clone();
         let rx_lang = Rc::clone(&rx_lang);
         glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-            let received = { rx_lang.borrow_mut().try_recv().ok() };
-            if let Some(words) = received {
+            if let Ok(words) = rx_lang.borrow_mut().try_recv() {
                 *all_words.borrow_mut() = words;
                 da.queue_draw();
             }
@@ -905,7 +910,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                 }
                 floating_copy_btn.set_visible(false);
 
-                let has_sel = { !selected_indices.borrow().is_empty() };
+                let has_sel = !selected_indices.borrow().is_empty();
                 if has_sel {
                     selected_indices.borrow_mut().clear();
                     *cached_text.borrow_mut() = None;
@@ -913,7 +918,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                     return glib::Propagation::Stop;
                 }
 
-                let has_locked = { locked_region.borrow().is_some() };
+                let has_locked = locked_region.borrow().is_some();
                 if has_locked {
                     *locked_region.borrow_mut() = None;
                     *cached_text.borrow_mut() = None;
@@ -936,33 +941,25 @@ pub fn build_overlay_window(app: &adw::Application) {
                 }
                 floating_copy_btn.set_visible(false);
 
-                let locked = { *locked_region.borrow() };
-                let (all_sel, text_opt) = {
-                    let words = all_words.borrow();
-                    let candidates: Vec<usize> = if let Some((rx, ry, rw, rh)) = locked {
-                        (0..words.len())
-                            .filter(|&i| {
-                                let w = &words[i];
-                                !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
-                            })
-                            .collect()
-                    } else {
-                        (0..words.len()).collect()
-                    };
-                    let lines = pipeline::cluster_words_into_lines(&words, &candidates);
-                    let sel: Vec<usize> = lines.into_iter().flatten().collect();
-
-                    let sel_words: Vec<&DetectedWord> =
-                        sel.iter().filter_map(|&i| words.get(i)).collect();
-                    let txt = if !sel_words.is_empty() {
-                        Some(pipeline::join_words(&sel_words))
-                    } else {
-                        None
-                    };
-                    (sel, txt)
+                let words = all_words.borrow();
+                let locked = *locked_region.borrow();
+                let all_sel: Vec<usize> = if let Some((rx, ry, rw, rh)) = locked {
+                    (0..words.len())
+                        .filter(|&i| {
+                            let w = &words[i];
+                            !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
+                        })
+                        .collect()
+                } else {
+                    (0..words.len()).collect()
                 };
 
-                *cached_text.borrow_mut() = text_opt;
+                let sel_words: Vec<&DetectedWord> =
+                    all_sel.iter().filter_map(|&i| words.get(i)).collect();
+                if !sel_words.is_empty() {
+                    *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
+                }
+                drop(words);
                 *selected_indices.borrow_mut() = all_sel;
                 da.queue_draw();
                 return glib::Propagation::Stop;
