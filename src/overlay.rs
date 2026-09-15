@@ -133,6 +133,10 @@ pub fn build_overlay_window(app: &adw::Application) {
             // 100% transparent background (NO solid blue fill!), delicate Libadwaita accent border
             for &idx in selected.iter() {
                 if let Some(word) = words.get(idx) {
+                    cr.set_source_rgba(ar, ag, ab, 0.14);
+                    cr.rectangle(word.x - 0.5, word.y - 0.5, word.w + 1.0, word.h + 1.0);
+                    let _ = cr.fill();
+
                     cr.set_source_rgba(ar, ag, ab, 0.95);
                     cr.set_line_width(1.0);
                     cr.rectangle(word.x - 0.5, word.y - 0.5, word.w + 1.0, word.h + 1.0);
@@ -324,8 +328,8 @@ pub fn build_overlay_window(app: &adw::Application) {
                     if let Some(idx) = clicked_idx {
                         *selected_indices.borrow_mut() = vec![idx];
                     }
-                } else if all_words.borrow().is_empty() && sw >= 8.0 && sh >= 8.0 {
-                    // If full-screen OCR is still processing, run fast crop TSV in ~30ms!
+                } else if selected_indices.borrow().is_empty() && sw >= 8.0 && sh >= 8.0 {
+                    // If no words were matched in selection, run fast crop OCR on the dragged region!
                     if let Some(ref img) = screen_img {
                         let (img_w, img_h) = img.dimensions();
                         let da_w = da.width() as f64;
@@ -341,18 +345,40 @@ pub fn build_overlay_window(app: &adw::Application) {
                         let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
                         let lang = active_lang.borrow().clone();
 
-                        if let Ok(mut crop_words) = pipeline::run_tesseract_tsv(&DynamicImage::ImageRgba8(crop), &lang) {
-                            let mut all_w = Vec::new();
+                        let crop_dyn = DynamicImage::ImageRgba8(crop);
+                        if let Ok(mut crop_words) = pipeline::run_tesseract_tsv(&crop_dyn, &lang) {
+                            let mut words = all_words.borrow_mut();
                             let mut sel_idx = Vec::new();
-                            for (i, w) in crop_words.iter_mut().enumerate() {
+                            for mut w in crop_words.drain(..) {
                                 w.x = (w.x + crop_x as f64) / scale_x;
                                 w.y = (w.y + crop_y as f64) / scale_y;
                                 w.w = w.w / scale_x;
                                 w.h = w.h / scale_y;
-                                all_w.push(w.clone());
-                                sel_idx.push(i);
+                                let new_idx = words.len();
+                                words.push(w);
+                                sel_idx.push(new_idx);
                             }
-                            *all_words.borrow_mut() = all_w;
+
+                            if sel_idx.is_empty() {
+                                if let Ok(text) = pipeline::run_tesseract(&crop_dyn, &lang) {
+                                    let trimmed = text.trim();
+                                    if !trimmed.is_empty() {
+                                        let new_idx = words.len();
+                                        words.push(DetectedWord {
+                                            x: sx,
+                                            y: sy,
+                                            w: sw,
+                                            h: sh,
+                                            text: trimmed.to_string(),
+                                            line_num: 1,
+                                            par_num: 1,
+                                            block_num: 1,
+                                        });
+                                        sel_idx.push(new_idx);
+                                    }
+                                }
+                            }
+                            drop(words);
                             *selected_indices.borrow_mut() = sel_idx;
                         }
                     }
@@ -379,18 +405,21 @@ pub fn build_overlay_window(app: &adw::Application) {
                     let btn_clone = floating_copy_btn.clone();
                     let copy_timer_clone = Rc::clone(&copy_timer);
                     let da_w = da.width() as f64;
+                    let da_h = da.height() as f64;
 
                     let source_id = glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
                         copy_timer_clone.borrow_mut().take();
                         let center_x = (min_x + max_x) / 2.0;
                         let btn_size = 38.0;
                         let max_allowed_x = (da_w - btn_size - 12.0).max(12.0);
+                        let max_allowed_y = (da_h - btn_size - 12.0).max(12.0);
                         let btn_x = ((center_x - btn_size / 2.0).max(12.0)).min(max_allowed_x);
                         let btn_y = if min_y - btn_size - 8.0 < 12.0 {
                             max_y + 8.0
                         } else {
                             min_y - btn_size - 8.0
                         };
+                        let btn_y = btn_y.min(max_allowed_y).max(12.0);
                         btn_clone.set_margin_start(btn_x as i32);
                         btn_clone.set_margin_top(btn_y as i32);
                         btn_clone.set_visible(true);
@@ -481,18 +510,21 @@ pub fn build_overlay_window(app: &adw::Application) {
                 let btn_clone = floating_copy_btn.clone();
                 let copy_timer_clone = Rc::clone(&copy_timer);
                 let da_w = da.width() as f64;
+                let da_h = da.height() as f64;
 
                 let source_id = glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
                     copy_timer_clone.borrow_mut().take();
                     let center_x = (min_x + max_x) / 2.0;
                     let btn_size = 38.0;
                     let max_allowed_x = (da_w - btn_size - 12.0).max(12.0);
+                    let max_allowed_y = (da_h - btn_size - 12.0).max(12.0);
                     let btn_x = ((center_x - btn_size / 2.0).max(12.0)).min(max_allowed_x);
                     let btn_y = if min_y - btn_size - 8.0 < 12.0 {
                         max_y + 8.0
                     } else {
                         min_y - btn_size - 8.0
                     };
+                    let btn_y = btn_y.min(max_allowed_y).max(12.0);
                     btn_clone.set_margin_start(btn_x as i32);
                     btn_clone.set_margin_top(btn_y as i32);
                     btn_clone.set_visible(true);
@@ -839,18 +871,21 @@ pub fn build_overlay_window(app: &adw::Application) {
                     let btn_clone = floating_copy_btn.clone();
                     let copy_timer_clone = Rc::clone(&copy_timer);
                     let da_w = da.width() as f64;
+                    let da_h = da.height() as f64;
 
                     let source_id = glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
                         copy_timer_clone.borrow_mut().take();
                         let center_x = (min_x + max_x) / 2.0;
                         let btn_size = 38.0;
                         let max_allowed_x = (da_w - btn_size - 12.0).max(12.0);
+                        let max_allowed_y = (da_h - btn_size - 12.0).max(12.0);
                         let btn_x = ((center_x - btn_size / 2.0).max(12.0)).min(max_allowed_x);
                         let btn_y = if min_y - btn_size - 8.0 < 12.0 {
                             max_y + 8.0
                         } else {
                             min_y - btn_size - 8.0
                         };
+                        let btn_y = btn_y.min(max_allowed_y).max(12.0);
                         btn_clone.set_margin_start(btn_x as i32);
                         btn_clone.set_margin_top(btn_y as i32);
                         btn_clone.set_visible(true);
