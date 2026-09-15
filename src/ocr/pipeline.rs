@@ -306,13 +306,11 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
 
     let (orig_w, orig_h) = processed.dimensions();
     let mut scale = 1.0f64;
-    if orig_h < 600 && orig_h > 0 {
-        scale = (2.0f64).min(1000.0 / orig_h as f64).max(1.0);
-        if (scale - 1.0).abs() > 0.05 {
-            let new_w = (orig_w as f64 * scale).round() as u32;
-            let new_h = (orig_h as f64 * scale).round() as u32;
-            processed = processed.resize_exact(new_w, new_h, imageops::FilterType::Triangle);
-        }
+    if orig_h < 80 && orig_h > 0 {
+        scale = (110.0 / orig_h as f64).max(2.0);
+        let new_w = (orig_w as f64 * scale).round() as u32;
+        let new_h = (orig_h as f64 * scale).round() as u32;
+        processed = processed.resize_exact(new_w, new_h, imageops::FilterType::Triangle);
     }
 
     let mut png_bytes = Vec::new();

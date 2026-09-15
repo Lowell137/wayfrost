@@ -1,5 +1,5 @@
 use anyhow::Result;
-use image::{DynamicImage, GenericImageView, RgbImage};
+use image::{DynamicImage, RgbImage};
 use wayfrost::ocr::model_manager::ensure_models;
 use wayfrost::ocr::pipeline::OcrEngine;
 
