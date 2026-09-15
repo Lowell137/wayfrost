@@ -63,8 +63,8 @@ pub fn build_overlay_window(app: &adw::Application) {
         .build();
 
     window.add_css_class("overlay-window");
-    window.fullscreen();
     window.set_cursor_from_name(Some("crosshair"));
+
 
     // Convert screenshot to Cairo ImageSurface for exact 1:1 painting
     let background_surface = screen_img.as_ref().and_then(|img| {
@@ -690,7 +690,10 @@ pub fn build_overlay_window(app: &adw::Application) {
     window.add_controller(key_controller);
 
     window.present();
+    // On GNOME Wayland the window must be mapped first before fullscreen() is honored.
+    window.fullscreen();
 }
+
 
 fn image_to_cairo_surface(img: &DynamicImage) -> Result<cairo::ImageSurface> {
     let (w, h) = img.dimensions();
