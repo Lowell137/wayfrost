@@ -346,31 +346,69 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
     }
 
     let tsv_str = String::from_utf8_lossy(&output.stdout);
+    let mut line_bounds: std::collections::HashMap<(usize, usize, usize), (f64, f64, f64, f64)> =
+        std::collections::HashMap::new();
     let mut words = Vec::new();
 
-    for line in tsv_str.lines() {
+    for line in tsv_str.lines().skip(1) {
         let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() >= 12 && parts[0] == "5" {
-            let text = parts[11].trim().to_string();
-            if !text.is_empty() {
-                let block_num = parts[2].parse::<usize>().unwrap_or(0);
-                let par_num = parts[3].parse::<usize>().unwrap_or(0);
-                let line_num = parts[4].parse::<usize>().unwrap_or(0);
-                let left = parts[6].parse::<f64>().unwrap_or(0.0) / scale;
-                let top = parts[7].parse::<f64>().unwrap_or(0.0) / scale;
-                let width = parts[8].parse::<f64>().unwrap_or(0.0) / scale;
-                let height = parts[9].parse::<f64>().unwrap_or(0.0) / scale;
+        if parts.len() >= 12 {
+            let level = parts[0];
+            let block_num = parts[2].parse::<usize>().unwrap_or(0);
+            let par_num = parts[3].parse::<usize>().unwrap_or(0);
+            let line_num = parts[4].parse::<usize>().unwrap_or(0);
+            let left = parts[6].parse::<f64>().unwrap_or(0.0) / scale;
+            let top = parts[7].parse::<f64>().unwrap_or(0.0) / scale;
+            let width = parts[8].parse::<f64>().unwrap_or(0.0) / scale;
+            let height = parts[9].parse::<f64>().unwrap_or(0.0) / scale;
 
-                words.push(DetectedWord {
-                    x: left,
-                    y: top,
-                    w: width,
-                    h: height,
-                    text,
-                    line_num,
-                    par_num,
-                    block_num,
-                });
+            if level == "4" {
+                line_bounds.insert((block_num, par_num, line_num), (left, top, width, height));
+            } else if level == "5" {
+                let text = parts[11].trim().to_string();
+                if !text.is_empty() {
+                    words.push(DetectedWord {
+                        x: left,
+                        y: top,
+                        w: width,
+                        h: height,
+                        text,
+                        line_num,
+                        par_num,
+                        block_num,
+                    });
+                }
+            }
+        }
+    }
+
+    // Harmonize vertical alignment per line to eliminate jumping and misaligned boxes
+    for w in &mut words {
+        if let Some(&(_, ly, _, lh)) = line_bounds.get(&(w.block_num, w.par_num, w.line_num)) {
+            w.y = ly;
+            w.h = lh.max(4.0);
+        }
+    }
+
+    // Sort words by line and x-coordinate
+    words.sort_by(|a, b| {
+        (a.block_num, a.par_num, a.line_num)
+            .cmp(&(b.block_num, b.par_num, b.line_num))
+            .then_with(|| a.x.total_cmp(&b.x))
+    });
+
+    // Fix overlapping and crushed word bounding boxes on the same line
+    if words.len() > 1 {
+        for i in 0..words.len() - 1 {
+            let same_line = words[i].block_num == words[i + 1].block_num
+                && words[i].par_num == words[i + 1].par_num
+                && words[i].line_num == words[i + 1].line_num;
+
+            if same_line {
+                let next_x = words[i + 1].x;
+                if words[i].x + words[i].w >= next_x {
+                    words[i].w = (next_x - 1.0 - words[i].x).max(1.0);
+                }
             }
         }
     }
