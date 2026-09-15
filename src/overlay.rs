@@ -421,7 +421,8 @@ pub fn build_overlay_window(app: &adw::Application) {
         let da = drawing_area.clone();
 
         gesture_drag.connect_drag_update(move |_, offset_x, offset_y| {
-            if let Some((start, _)) = *text_drag.borrow() {
+            let t_start_opt = text_drag.borrow().map(|(start, _)| start);
+            if let Some(start) = t_start_opt {
                 let current = (start.0 + offset_x, start.1 + offset_y);
                 *text_drag.borrow_mut() = Some((start, current));
 
@@ -447,10 +448,13 @@ pub fn build_overlay_window(app: &adw::Application) {
                 drop(words);
                 *selected_indices.borrow_mut() = new_sel;
                 da.queue_draw();
-            } else if let Some((start, _)) = *framing_drag.borrow() {
-                let current = (start.0 + offset_x, start.1 + offset_y);
-                *framing_drag.borrow_mut() = Some((start, current));
-                da.queue_draw();
+            } else {
+                let f_start_opt = framing_drag.borrow().map(|(start, _)| start);
+                if let Some(start) = f_start_opt {
+                    let current = (start.0 + offset_x, start.1 + offset_y);
+                    *framing_drag.borrow_mut() = Some((start, current));
+                    da.queue_draw();
+                }
             }
         });
     }
@@ -655,8 +659,10 @@ pub fn build_overlay_window(app: &adw::Application) {
         });
     }
 
-    // 3. Reset Selection Button (Pure symbolic icon: view-refresh-symbolic, 24px)
-    let btn_reset_region = create_symbolic_button("view-refresh-symbolic", "Seçimi Sıfırla (Esc)");
+    // 3. Reset Selection Button (Pure symbolic icon: view-refresh-symbolic, enlarged to 28px)
+    let btn_reset_region =
+        create_symbolic_button_sized("view-refresh-symbolic", "Seçimi Sıfırla (Esc)", 28);
+    btn_reset_region.add_css_class("btn-reset");
     {
         let da = drawing_area.clone();
         let locked_region = Rc::clone(&locked_region);
@@ -839,6 +845,19 @@ pub fn build_overlay_window(app: &adw::Application) {
             padding: 8px;
             color: #f2f2f7;
             transition: background-color 150ms ease, transform 100ms ease;
+        }
+
+        .floating-pill button image,
+        .floating-pill .pill-btn image {
+            -gtk-icon-size: 24px;
+            min-width: 24px;
+            min-height: 24px;
+        }
+
+        .floating-pill button.btn-reset image {
+            -gtk-icon-size: 28px;
+            min-width: 28px;
+            min-height: 28px;
         }
 
         .floating-pill button:hover,
@@ -1059,14 +1078,18 @@ fn get_accent_color(widget: &DrawingArea) -> (f64, f64, f64, f64) {
     (0.208, 0.518, 0.894, 1.0)
 }
 
-fn create_symbolic_button(icon_name: &str, tooltip: &str) -> Button {
+fn create_symbolic_button_sized(icon_name: &str, tooltip: &str, size: i32) -> Button {
     let btn = Button::new();
     btn.add_css_class("pill-btn");
     let icon = Image::from_icon_name(icon_name);
-    icon.set_pixel_size(24);
+    icon.set_pixel_size(size);
     btn.set_child(Some(&icon));
     btn.set_tooltip_text(Some(tooltip));
     btn
+}
+
+fn create_symbolic_button(icon_name: &str, tooltip: &str) -> Button {
+    create_symbolic_button_sized(icon_name, tooltip, 24)
 }
 
 #[allow(dead_code)]
