@@ -73,7 +73,6 @@ pub fn build_overlay_window(app: &adw::Application) {
     let ocr_engine: Rc<RefCell<Option<OcrEngine>>> = Rc::new(RefCell::new(None));
     let selection = Rc::new(RefCell::new(SelectionState::default()));
     let active_lang = Rc::new(RefCell::new("TR".to_string()));
-    let current_ocr_text = Rc::new(RefCell::new(String::new()));
 
     let root_overlay = Overlay::new();
 
@@ -147,62 +146,6 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
     root_overlay.set_child(Some(&drawing_area));
 
-    // --- Helper function: Copy current recognized text and close ---
-    let copy_selected_text = {
-        let current_ocr_text = Rc::clone(&current_ocr_text);
-        let window_weak = window.downgrade();
-
-        move || {
-            let text = current_ocr_text.borrow().trim().to_string();
-            if !text.is_empty() {
-                let _ = clipboard::copy_to_clipboard(&text);
-                let preview = if text.len() > 60 {
-                    format!("{}...", &text[..60])
-                } else {
-                    text
-                };
-                clipboard::send_notification("Wayfrost — Kopyalandı", &preview);
-
-                if let Some(win) = window_weak.upgrade() {
-                    win.close();
-                }
-            }
-        }
-    };
-
-    // --- Helper function: Copy all screen text and close ---
-    let copy_all_text = {
-        let screen_img = screen_img.clone();
-        let ocr_engine = Rc::clone(&ocr_engine);
-        let active_lang = Rc::clone(&active_lang);
-        let window_weak = window.downgrade();
-
-        move || {
-            let Some(ref img) = screen_img else { return; };
-            if ocr_engine.borrow().is_none() {
-                if let Ok(paths) = model_manager::ensure_models() {
-                    if let Ok(engine) = OcrEngine::new(&paths.rec_model, &paths.dict_file) {
-                        *ocr_engine.borrow_mut() = Some(engine);
-                    }
-                }
-            }
-            let lang = active_lang.borrow().clone();
-            let mut engine_ref = ocr_engine.borrow_mut();
-            if let Some(ref mut engine) = *engine_ref {
-                if let Ok(text) = engine.recognize(img.as_ref(), &lang) {
-                    let trimmed = text.trim();
-                    if !trimmed.is_empty() {
-                        let _ = clipboard::copy_to_clipboard(trimmed);
-                        clipboard::send_notification("Wayfrost — Tüm Metin Kopyalandı", trimmed);
-                        if let Some(win) = window_weak.upgrade() {
-                            win.close();
-                        }
-                    }
-                }
-            }
-        }
-    };
-
     // --- Helper function: Execute OCR on selected coordinates ---
     let execute_ocr = {
         let screen_img = screen_img.clone();
@@ -250,64 +193,46 @@ pub fn build_overlay_window(app: &adw::Application) {
         }
     };
 
-    // --- Windows 11 Snipping Tool Style Floating Context Menu (Anchored to Selection) ---
-    let context_menu = Box::new(Orientation::Vertical, 2);
-    context_menu.add_css_class("win11-context-menu");
-
-    let menu_preview = Label::new(None);
-    menu_preview.add_css_class("win11-menu-preview");
-    menu_preview.set_halign(Align::Start);
-    menu_preview.set_max_width_chars(32);
-    menu_preview.set_ellipsize(gtk::pango::EllipsizeMode::End);
-    menu_preview.set_visible(false);
-    context_menu.append(&menu_preview);
-
-    let btn_copy_menu = create_menu_item("edit-copy-symbolic", "Metni Kopyala", "Ctrl+C");
-    {
-        let copy_fn = copy_selected_text.clone();
-        btn_copy_menu.connect_clicked(move |_| {
-            copy_fn();
-        });
-    }
-
-    let btn_select_all_menu = create_menu_item("edit-select-all-symbolic", "Tümünü Kopyala", "Ctrl+A");
-    {
-        let copy_all_fn = copy_all_text.clone();
-        btn_select_all_menu.connect_clicked(move |_| {
-            copy_all_fn();
-        });
-    }
-
-    let btn_close_menu = create_menu_item("window-close-symbolic", "Kapat", "Esc");
-    {
+    // --- Helper function: Copy all screen text and close ---
+    let copy_all_text = {
+        let screen_img = screen_img.clone();
+        let ocr_engine = Rc::clone(&ocr_engine);
+        let active_lang = Rc::clone(&active_lang);
         let window_weak = window.downgrade();
-        btn_close_menu.connect_clicked(move |_| {
-            if let Some(win) = window_weak.upgrade() {
-                win.close();
+
+        move || {
+            let Some(ref img) = screen_img else { return; };
+            if ocr_engine.borrow().is_none() {
+                if let Ok(paths) = model_manager::ensure_models() {
+                    if let Ok(engine) = OcrEngine::new(&paths.rec_model, &paths.dict_file) {
+                        *ocr_engine.borrow_mut() = Some(engine);
+                    }
+                }
             }
-        });
-    }
-
-    context_menu.append(&btn_copy_menu);
-    context_menu.append(&btn_select_all_menu);
-    context_menu.append(&btn_close_menu);
-
-    let menu_overlay_box = Box::new(Orientation::Vertical, 0);
-    menu_overlay_box.set_valign(Align::Start);
-    menu_overlay_box.set_halign(Align::Start);
-    menu_overlay_box.set_visible(false);
-    menu_overlay_box.append(&context_menu);
-    root_overlay.add_overlay(&menu_overlay_box);
+            let lang = active_lang.borrow().clone();
+            let mut engine_ref = ocr_engine.borrow_mut();
+            if let Some(ref mut engine) = *engine_ref {
+                if let Ok(text) = engine.recognize(img.as_ref(), &lang) {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        let _ = clipboard::copy_to_clipboard(trimmed);
+                        clipboard::send_notification("Wayfrost — Tüm Metin Kopyalandı", trimmed);
+                        if let Some(win) = window_weak.upgrade() {
+                            win.close();
+                        }
+                    }
+                }
+            }
+        }
+    };
 
     // --- Mouse Drag Gestures for Live Screen Selection ---
     let gesture_drag = GestureDrag::new();
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
-        let menu_overlay_box = menu_overlay_box.clone();
 
         gesture_drag.connect_drag_begin(move |_, x, y| {
-            menu_overlay_box.set_visible(false);
             let mut s = selection.borrow_mut();
             s.start_x = x;
             s.start_y = y;
@@ -336,13 +261,11 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
-        let menu_overlay_box = menu_overlay_box.clone();
-        let menu_preview = menu_preview.clone();
-        let current_ocr_text = Rc::clone(&current_ocr_text);
         let execute_ocr = execute_ocr.clone();
+        let window_weak = window.downgrade();
 
         gesture_drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-            let (has_selection, rect) = {
+            let has_selection = {
                 let mut s = selection.borrow_mut();
                 if let Some((start_x, start_y)) = gesture.start_point() {
                     s.current_x = start_x + offset_x;
@@ -351,57 +274,38 @@ pub fn build_overlay_window(app: &adw::Application) {
                     s.completed = true;
                     da.queue_draw();
                 }
-                (s.normalized().is_some(), s.normalized())
-            };
+                s.normalized().is_some()
+            }; // <-- mutable borrow is dropped immediately here
 
             if has_selection {
-                if let Some((sx, sy, sw, sh)) = rect {
-                    let win_w = da.width() as f64;
-                    let win_h = da.height() as f64;
-                    let menu_w = 240.0;
-                    let menu_h = 125.0;
-
-                    // Position directly at the bottom-right corner of the selection
-                    let pos_x = if sx + sw + menu_w + 12.0 <= win_w {
-                        sx + sw + 4.0
-                    } else if sx + sw - menu_w >= 12.0 {
-                        sx + sw - menu_w
-                    } else {
-                        sx.clamp(12.0, (win_w - menu_w - 12.0).max(12.0))
-                    };
-
-                    let pos_y = if sy + sh + menu_h + 12.0 <= win_h {
-                        sy + sh + 6.0
-                    } else if sy - menu_h - 6.0 >= 12.0 {
-                        sy - menu_h - 6.0
-                    } else {
-                        (sy + sh - menu_h).clamp(12.0, (win_h - menu_h - 12.0).max(12.0))
-                    };
-
-                    menu_overlay_box.set_margin_start(pos_x as i32);
-                    menu_overlay_box.set_margin_top(pos_y as i32);
-                    menu_overlay_box.set_visible(true);
-                }
-
+                // Instant Text Extractor: OCR runs, copies directly to clipboard, and exits!
                 match execute_ocr() {
                     Ok(text) => {
-                        let trimmed = text.trim().to_string();
+                        let trimmed = text.trim();
                         if !trimmed.is_empty() {
-                            let preview = if trimmed.len() > 30 {
-                                format!("\"{}...\"", &trimmed[..28])
+                            let _ = clipboard::copy_to_clipboard(trimmed);
+                            let preview = if trimmed.len() > 60 {
+                                format!("{}...", &trimmed[..60])
                             } else {
-                                format!("\"{}\"", trimmed)
+                                trimmed.to_string()
                             };
-                            menu_preview.set_text(&preview);
-                            menu_preview.set_visible(true);
+                            clipboard::send_notification("Wayfrost — Kopyalandı", &preview);
+                            if let Some(win) = window_weak.upgrade() {
+                                win.close();
+                            }
                         } else {
-                            menu_preview.set_text("Metin bulunamadı");
-                            menu_preview.set_visible(true);
+                            clipboard::send_notification("Wayfrost", "Seçilen alanda metin bulunamadı");
+                            if let Some(win) = window_weak.upgrade() {
+                                win.close();
+                            }
                         }
-                        *current_ocr_text.borrow_mut() = trimmed;
                     }
                     Err(e) => {
                         log::error!("OCR error: {e}");
+                        clipboard::send_notification("Wayfrost Hata", &format!("{e}"));
+                        if let Some(win) = window_weak.upgrade() {
+                            win.close();
+                        }
                     }
                 }
             }
@@ -577,50 +481,6 @@ pub fn build_overlay_window(app: &adw::Application) {
             min-width: 1px;
         }
 
-        /* Windows 11 Snipping Tool Floating Context Menu */
-        .win11-context-menu {
-            background: rgba(32, 32, 36, 0.96);
-            border: 1px solid rgba(255, 255, 255, 0.16);
-            border-radius: 8px;
-            padding: 5px;
-            box-shadow: 0 16px 44px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.06);
-            backdrop-filter: blur(24px);
-            min-width: 220px;
-        }
-
-        .win11-menu-preview {
-            color: #93c5fd;
-            font-size: 11px;
-            font-weight: 500;
-            padding: 4px 10px 6px 10px;
-            border-bottom: 1px solid rgba(255, 255, 255, 0.10);
-            margin-bottom: 3px;
-        }
-
-        .win11-menu-item {
-            background: transparent;
-            border: none;
-            border-radius: 6px;
-            padding: 7px 12px;
-            color: #f2f2f7;
-            font-size: 13px;
-            font-weight: 500;
-            transition: background-color 100ms ease;
-        }
-
-        .win11-menu-item:hover,
-        .win11-menu-item:focus {
-            background: rgba(255, 255, 255, 0.14);
-            color: #ffffff;
-        }
-
-        .win11-shortcut {
-            color: #9e9ea6;
-            font-size: 11px;
-            font-weight: 400;
-            margin-left: 18px;
-        }
-
         .lang-popover contents {
             background: rgba(30, 30, 32, 0.96);
             border: 1px solid rgba(255, 255, 255, 0.12);
@@ -652,11 +512,10 @@ pub fn build_overlay_window(app: &adw::Application) {
         gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    // --- Key Controller: Escape = close, Ctrl+C / Enter = copy selected, Ctrl+A = copy all ---
+    // --- Key Controller: Escape = close, Ctrl+A = copy all ---
     let key_controller = EventControllerKey::new();
     {
         let window_weak = window.downgrade();
-        let copy_selected = copy_selected_text.clone();
         let copy_all = copy_all_text.clone();
 
         key_controller.connect_key_pressed(move |_, keyval, _, state| {
@@ -667,25 +526,11 @@ pub fn build_overlay_window(app: &adw::Application) {
                 }
             }
 
-            // Ctrl+C: copy selected text
-            if state.contains(gdk::ModifierType::CONTROL_MASK)
-                && (keyval == gdk::Key::c || keyval == gdk::Key::C)
-            {
-                copy_selected();
-                return glib::Propagation::Stop;
-            }
-
             // Ctrl+A: copy all screen text
             if state.contains(gdk::ModifierType::CONTROL_MASK)
                 && (keyval == gdk::Key::a || keyval == gdk::Key::A)
             {
                 copy_all();
-                return glib::Propagation::Stop;
-            }
-
-            // Enter: copy selected text
-            if keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter {
-                copy_selected();
                 return glib::Propagation::Stop;
             }
 
@@ -706,30 +551,6 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
         });
     }
-}
-
-fn create_menu_item(icon_name: &str, label_text: &str, shortcut_text: &str) -> Button {
-    let btn = Button::new();
-    btn.add_css_class("win11-menu-item");
-
-    let row = Box::new(Orientation::Horizontal, 8);
-    let icon = Image::from_icon_name(icon_name);
-    icon.set_pixel_size(16);
-
-    let label = Label::new(Some(label_text));
-    label.set_hexpand(true);
-    label.set_halign(Align::Start);
-
-    let shortcut = Label::new(Some(shortcut_text));
-    shortcut.add_css_class("win11-shortcut");
-    shortcut.set_halign(Align::End);
-
-    row.append(&icon);
-    row.append(&label);
-    row.append(&shortcut);
-
-    btn.set_child(Some(&row));
-    btn
 }
 
 fn image_to_cairo_surface(img: &DynamicImage) -> Result<cairo::ImageSurface> {
