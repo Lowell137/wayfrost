@@ -355,7 +355,10 @@ pub fn build_overlay_window(app: &adw::Application) {
         let da = drawing_area.clone();
 
         gesture_drag.connect_drag_update(move |_, offset_x, offset_y| {
-            if let Some((start, _)) = *text_drag.borrow() {
+            let t_start = text_drag.borrow().map(|(start, _)| start);
+            let f_start = framing_drag.borrow().map(|(start, _)| start);
+
+            if let Some(start) = t_start {
                 let current = (start.0 + offset_x, start.1 + offset_y);
                 *text_drag.borrow_mut() = Some((start, current));
 
@@ -379,9 +382,10 @@ pub fn build_overlay_window(app: &adw::Application) {
                         new_sel.push(i);
                     }
                 }
+                drop(words);
                 *selected_indices.borrow_mut() = new_sel;
                 da.queue_draw();
-            } else if let Some((start, _)) = *framing_drag.borrow() {
+            } else if let Some(start) = f_start {
                 let current = (start.0 + offset_x, start.1 + offset_y);
                 *framing_drag.borrow_mut() = Some((start, current));
                 da.queue_draw();
@@ -767,8 +771,9 @@ pub fn build_overlay_window(app: &adw::Application) {
 
         key_controller.connect_key_pressed(move |_, keyval, _, state| {
             if keyval == gdk::Key::Escape {
-                // If a region is locked or words are selected, first Escape clears them!
-                if locked_region.borrow().is_some() || !selected_indices.borrow().is_empty() {
+                let has_region = locked_region.borrow().is_some();
+                let has_sel = !selected_indices.borrow().is_empty();
+                if has_region || has_sel {
                     *locked_region.borrow_mut() = None;
                     selected_indices.borrow_mut().clear();
                     *cached_text.borrow_mut() = None;
