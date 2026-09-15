@@ -156,6 +156,9 @@ pub fn build_overlay_window(app: &adw::Application) {
     let in_place_scrolled = ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vscrollbar_policy(gtk::PolicyType::Automatic)
+        .propagate_natural_height(true)
+        .propagate_natural_width(true)
+        .max_content_height(500)
         .child(&in_place_textview)
         .build();
 
@@ -324,7 +327,7 @@ pub fn build_overlay_window(app: &adw::Application) {
             }; // <-- mutable borrow dropped here
 
             if has_selection {
-                if let Some((sx, sy, sw, sh)) = rect {
+                if let Some((sx, sy, sw, _sh)) = rect {
                     if let Ok(text) = execute_ocr() {
                         let trimmed = text.trim();
                         if !trimmed.is_empty() {
@@ -335,8 +338,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                             in_place_box.set_margin_start(sx as i32);
                             in_place_box.set_margin_top(sy as i32);
                             let target_w = (sw as i32).max(180);
-                            let target_h = (sh as i32).max(40);
-                            in_place_box.set_size_request(target_w, target_h);
+                            in_place_box.set_size_request(target_w, -1);
 
                             in_place_box.set_visible(true);
                             in_place_textview.grab_focus();
