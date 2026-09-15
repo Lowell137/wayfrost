@@ -5,8 +5,8 @@ use gtk4::gdk;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
-    Align, Box, Button, CssProvider, DrawingArea, EventControllerKey, GestureDrag, Image, Label,
-    Orientation, Overlay, Popover, Separator,
+    Align, Box, Button, CssProvider, DrawingArea, EventControllerKey, EventControllerMotion,
+    GestureDrag, Image, Label, Orientation, Overlay, Popover, Separator,
 };
 use image::{imageops, DynamicImage, GenericImageView};
 use libadwaita as adw;
@@ -17,33 +17,6 @@ use std::sync::Arc;
 use crate::capture;
 use crate::clipboard;
 use crate::ocr::pipeline::{self, DetectedWord};
-
-#[derive(Default, Clone, Copy, Debug)]
-pub struct SelectionState {
-    pub start_x: f64,
-    pub start_y: f64,
-    pub current_x: f64,
-    pub current_y: f64,
-    pub active: bool,
-    pub completed: bool,
-}
-
-impl SelectionState {
-    pub fn normalized(&self) -> Option<(f64, f64, f64, f64)> {
-        if !self.active && !self.completed {
-            return None;
-        }
-        let x = self.start_x.min(self.current_x).max(0.0);
-        let y = self.start_y.min(self.current_y).max(0.0);
-        let w = (self.start_x - self.current_x).abs();
-        let h = (self.start_y - self.current_y).abs();
-        if w >= 4.0 && h >= 4.0 {
-            Some((x, y, w, h))
-        } else {
-            None
-        }
-    }
-}
 
 pub fn build_overlay_window(app: &adw::Application) {
     // 1. Capture screen at startup
@@ -70,7 +43,9 @@ pub fn build_overlay_window(app: &adw::Application) {
         image_to_cairo_surface(img).ok().map(Rc::new)
     });
 
-    let selection = Rc::new(RefCell::new(SelectionState::default()));
+    let locked_region: Rc<RefCell<Option<(f64, f64, f64, f64)>>> = Rc::new(RefCell::new(None));
+    let framing_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
+    let text_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
     let active_lang = Rc::new(RefCell::new("TR".to_string()));
     let cached_text: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
@@ -87,8 +62,10 @@ pub fn build_overlay_window(app: &adw::Application) {
     drawing_area.set_vexpand(true);
 
     {
-        let selection = Rc::clone(&selection);
         let surface = background_surface.clone();
+        let locked_region = Rc::clone(&locked_region);
+        let framing_drag = Rc::clone(&framing_drag);
+        let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
 
@@ -114,50 +91,119 @@ pub fn build_overlay_window(app: &adw::Application) {
                 let _ = cr.fill();
             }
 
-            let s = selection.borrow();
+            let f_drag = *framing_drag.borrow();
+            let locked = *locked_region.borrow();
+            let t_drag = *text_drag.borrow();
             let words = all_words.borrow();
             let selected = selected_indices.borrow();
 
-            // 2. Dim background outside drag area while user is dragging
-            if let Some((sx, sy, sw, sh)) = s.normalized() {
-                if s.active {
-                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
-                    // Top
-                    cr.rectangle(0.0, 0.0, w, sy);
-                    let _ = cr.fill();
-                    // Bottom
-                    cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
-                    let _ = cr.fill();
-                    // Left
-                    cr.rectangle(0.0, sy, sx, sh);
-                    let _ = cr.fill();
-                    // Right
-                    cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
-                    let _ = cr.fill();
+            // 2. Dim background and draw region frame
+            if let Some((start, curr)) = f_drag {
+                // User is actively dragging to frame a region
+                let sx = start.0.min(curr.0);
+                let sy = start.1.min(curr.1);
+                let sw = (start.0 - curr.0).abs();
+                let sh = (start.1 - curr.1).abs();
 
-                    // Subtle white drag rectangle border
-                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.75);
-                    cr.set_line_width(1.5);
-                    cr.rectangle(sx, sy, sw, sh);
-                    let _ = cr.stroke();
-                }
-            } else if selected.is_empty() {
-                // Subtle scrim before any selection
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.40);
+                // Top
+                cr.rectangle(0.0, 0.0, w, sy);
+                let _ = cr.fill();
+                // Bottom
+                cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
+                let _ = cr.fill();
+                // Left
+                cr.rectangle(0.0, sy, sx, sh);
+                let _ = cr.fill();
+                // Right
+                cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
+                let _ = cr.fill();
+
+                // Subtle white drag rectangle border
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
+                cr.set_line_width(1.5);
+                cr.rectangle(sx, sy, sw, sh);
+                let _ = cr.stroke();
+            } else if let Some((rx, ry, rw, rh)) = locked {
+                // REGION IS LOCKED! IT PERSISTS ON SCREEN!
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.42);
+                // Top
+                cr.rectangle(0.0, 0.0, w, ry);
+                let _ = cr.fill();
+                // Bottom
+                cr.rectangle(0.0, ry + rh, w, (h - (ry + rh)).max(0.0));
+                let _ = cr.fill();
+                // Left
+                cr.rectangle(0.0, ry, rx, rh);
+                let _ = cr.fill();
+                // Right
+                cr.rectangle(rx + rw, ry, (w - (rx + rw)).max(0.0), rh);
+                let _ = cr.fill();
+
+                // Crisp vibrant blue frame border
+                cr.set_source_rgba(0.24, 0.58, 0.98, 0.90);
+                cr.set_line_width(2.0);
+                cr.rectangle(rx, ry, rw, rh);
+                let _ = cr.stroke();
+
+                // Sleek corner accent marks
+                let corner_len = 14.0f64.min(rw / 4.0).min(rh / 4.0);
+                cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+                cr.set_line_width(2.5);
+                // Top-Left
+                cr.move_to(rx, ry + corner_len);
+                cr.line_to(rx, ry);
+                cr.line_to(rx + corner_len, ry);
+                let _ = cr.stroke();
+                // Top-Right
+                cr.move_to(rx + rw - corner_len, ry);
+                cr.line_to(rx + rw, ry);
+                cr.line_to(rx + rw, ry + corner_len);
+                let _ = cr.stroke();
+                // Bottom-Left
+                cr.move_to(rx, ry + rh - corner_len);
+                cr.line_to(rx, ry + rh);
+                cr.line_to(rx + corner_len, ry + rh);
+                let _ = cr.stroke();
+                // Bottom-Right
+                cr.move_to(rx + rw - corner_len, ry + rh);
+                cr.line_to(rx + rw, ry + rh);
+                cr.line_to(rx + rw, ry + rh - corner_len);
+                let _ = cr.stroke();
+            } else {
+                // Initial subtle scrim before any region is selected
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.20);
                 cr.rectangle(0.0, 0.0, w, h);
                 let _ = cr.fill();
             }
 
-            // 3. Apple/Windows LIVE TEXT: highlight selected words directly on the image!
+            // 3. Text drag selection box inside region
+            if let Some((start, curr)) = t_drag {
+                let tx1 = start.0.min(curr.0);
+                let ty1 = start.1.min(curr.1);
+                let tw = (start.0 - curr.0).abs();
+                let th = (start.1 - curr.1).abs();
+
+                cr.set_source_rgba(0.24, 0.58, 0.98, 0.15);
+                cr.rectangle(tx1, ty1, tw, th);
+                let _ = cr.fill();
+
+                cr.set_source_rgba(0.35, 0.65, 1.0, 0.60);
+                cr.set_line_width(1.0);
+                cr.rectangle(tx1, ty1, tw, th);
+                let _ = cr.stroke();
+            }
+
+            // 4. Apple/Windows LIVE TEXT: highlight selected words directly on the image!
             for &idx in selected.iter() {
                 if let Some(word) = words.get(idx) {
                     // Translucent blue highlighter over the exact word on the original image
-                    cr.set_source_rgba(0.18, 0.52, 0.95, 0.40);
+                    cr.set_source_rgba(0.18, 0.52, 0.95, 0.42);
                     cr.rectangle(word.x - 1.0, word.y - 1.0, word.w + 2.0, word.h + 2.0);
                     let _ = cr.fill();
 
                     // Crisp subtle border
-                    cr.set_source_rgba(0.28, 0.62, 0.98, 0.90);
+                    cr.set_source_rgba(0.35, 0.68, 1.0, 0.90);
                     cr.set_line_width(1.0);
                     cr.rectangle(word.x - 1.0, word.y - 1.0, word.w + 2.0, word.h + 2.0);
                     let _ = cr.stroke();
@@ -223,6 +269,7 @@ pub fn build_overlay_window(app: &adw::Application) {
         let cached_text = Rc::clone(&cached_text);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
+        let locked_region = Rc::clone(&locked_region);
         let window_weak = window.downgrade();
 
         move || {
@@ -233,6 +280,14 @@ pub fn build_overlay_window(app: &adw::Application) {
                 let sel_words: Vec<&DetectedWord> = selected.iter().filter_map(|&i| words.get(i)).collect();
                 if !sel_words.is_empty() {
                     text = pipeline::join_words(&sel_words);
+                } else if let Some((rx, ry, rw, rh)) = *locked_region.borrow() {
+                    // Fallback: If user locked a region but didn't select individual words, copy all words in region!
+                    let region_words: Vec<&DetectedWord> = words.iter().filter(|w| {
+                        !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
+                    }).collect();
+                    if !region_words.is_empty() {
+                        text = pipeline::join_words(&region_words);
+                    }
                 }
             }
 
@@ -258,110 +313,150 @@ pub fn build_overlay_window(app: &adw::Application) {
     // --- Mouse Drag Gestures: Select text live directly on the screen ---
     let gesture_drag = GestureDrag::new();
     {
-        let selection = Rc::clone(&selection);
-        let da = drawing_area.clone();
-        let cached_text = Rc::clone(&cached_text);
+        let locked_region = Rc::clone(&locked_region);
+        let framing_drag = Rc::clone(&framing_drag);
+        let text_drag = Rc::clone(&text_drag);
         let selected_indices = Rc::clone(&selected_indices);
+        let cached_text = Rc::clone(&cached_text);
+        let da = drawing_area.clone();
 
-        gesture_drag.connect_drag_begin(move |_, x, y| {
-            *cached_text.borrow_mut() = None;
-            *selected_indices.borrow_mut() = Vec::new();
-            let mut s = selection.borrow_mut();
-            s.start_x = x;
-            s.start_y = y;
-            s.current_x = x;
-            s.current_y = y;
-            s.active = true;
-            s.completed = false;
+        gesture_drag.connect_drag_begin(move |_, start_x, start_y| {
+            let current_locked = *locked_region.borrow();
+            let is_inside_locked = if let Some((rx, ry, rw, rh)) = current_locked {
+                start_x >= rx && start_x <= rx + rw && start_y >= ry && start_y <= ry + rh
+            } else {
+                false
+            };
+
+            if is_inside_locked {
+                // Clicked inside locked region -> Start Text Drag
+                *text_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
+                *framing_drag.borrow_mut() = None;
+                selected_indices.borrow_mut().clear();
+                *cached_text.borrow_mut() = None;
+            } else {
+                // Clicked outside -> Start new Region Framing Drag
+                *locked_region.borrow_mut() = None;
+                *text_drag.borrow_mut() = None;
+                *framing_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
+                selected_indices.borrow_mut().clear();
+                *cached_text.borrow_mut() = None;
+            }
             da.queue_draw();
         });
     }
 
     {
-        let selection = Rc::clone(&selection);
-        let da = drawing_area.clone();
+        let locked_region = Rc::clone(&locked_region);
+        let framing_drag = Rc::clone(&framing_drag);
+        let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
+        let da = drawing_area.clone();
 
-        gesture_drag.connect_drag_update(move |gesture, offset_x, offset_y| {
-            let mut s = selection.borrow_mut();
-            if let Some((start_x, start_y)) = gesture.start_point() {
-                s.current_x = start_x + offset_x;
-                s.current_y = start_y + offset_y;
+        gesture_drag.connect_drag_update(move |_, offset_x, offset_y| {
+            if let Some((start, _)) = *text_drag.borrow() {
+                let current = (start.0 + offset_x, start.1 + offset_y);
+                *text_drag.borrow_mut() = Some((start, current));
 
-                if let Some((sx, sy, sw, sh)) = s.normalized() {
-                    let words = all_words.borrow();
-                    let mut new_sel = Vec::new();
-                    let (sx2, sy2) = (sx + sw, sy + sh);
-                    for (i, w) in words.iter().enumerate() {
-                        let (wx2, wy2) = (w.x + w.w, w.y + w.h);
-                        if !(wx2 < sx || w.x > sx2 || wy2 < sy || w.y > sy2) {
-                            new_sel.push(i);
+                let min_x = start.0.min(current.0);
+                let max_x = start.0.max(current.0);
+                let min_y = start.1.min(current.1) - 6.0;
+                let max_y = start.1.max(current.1) + 6.0;
+
+                let words = all_words.borrow();
+                let locked = *locked_region.borrow();
+                let mut new_sel = Vec::new();
+
+                for (i, w) in words.iter().enumerate() {
+                    if let Some((rx, ry, rw, rh)) = locked {
+                        if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
+                            continue;
                         }
                     }
-                    *selected_indices.borrow_mut() = new_sel;
+                    let (wx2, wy2) = (w.x + w.w, w.y + w.h);
+                    if !(wx2 < min_x || w.x > max_x || wy2 < min_y || w.y > max_y) {
+                        new_sel.push(i);
+                    }
                 }
+                *selected_indices.borrow_mut() = new_sel;
+                da.queue_draw();
+            } else if let Some((start, _)) = *framing_drag.borrow() {
+                let current = (start.0 + offset_x, start.1 + offset_y);
+                *framing_drag.borrow_mut() = Some((start, current));
                 da.queue_draw();
             }
         });
     }
 
     {
-        let selection = Rc::clone(&selection);
-        let da = drawing_area.clone();
+        let locked_region = Rc::clone(&locked_region);
+        let framing_drag = Rc::clone(&framing_drag);
+        let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
         let screen_img = screen_img.clone();
         let active_lang = Rc::clone(&active_lang);
+        let da = drawing_area.clone();
 
-        gesture_drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-            let rect = {
-                let mut s = selection.borrow_mut();
-                if let Some((start_x, start_y)) = gesture.start_point() {
-                    s.current_x = start_x + offset_x;
-                    s.current_y = start_y + offset_y;
-                    s.active = false;
-                    s.completed = true;
-                    da.queue_draw();
-                }
-                s.normalized()
-            };
+        gesture_drag.connect_drag_end(move |_, offset_x, offset_y| {
+            if let Some((start, current)) = framing_drag.borrow_mut().take() {
+                let sx = start.0.min(current.0);
+                let sy = start.1.min(current.1);
+                let sw = (start.0 - current.0).abs();
+                let sh = (start.1 - current.1).abs();
 
-            if let Some((sx, sy, sw, sh)) = rect {
-                let words_empty = all_words.borrow().is_empty();
+                if sw >= 10.0 && sh >= 10.0 {
+                    *locked_region.borrow_mut() = Some((sx, sy, sw, sh));
 
-                // If full screen words are not ready yet, run quick crop TSV in 30ms!
-                if words_empty {
-                    if let Some(ref img) = screen_img {
-                        let (img_w, img_h) = img.dimensions();
-                        let da_w = da.width() as f64;
-                        let da_h = da.height() as f64;
-                        let scale_x = img_w as f64 / da_w.max(1.0);
-                        let scale_y = img_h as f64 / da_h.max(1.0);
+                    // If full screen words are not ready yet, run quick crop TSV in ~30ms!
+                    if all_words.borrow().is_empty() {
+                        if let Some(ref img) = screen_img {
+                            let (img_w, img_h) = img.dimensions();
+                            let da_w = da.width() as f64;
+                            let da_h = da.height() as f64;
+                            let scale_x = img_w as f64 / da_w.max(1.0);
+                            let scale_y = img_h as f64 / da_h.max(1.0);
 
-                        let crop_x = ((sx * scale_x).round() as u32).min(img_w.saturating_sub(1));
-                        let crop_y = ((sy * scale_y).round() as u32).min(img_h.saturating_sub(1));
-                        let crop_w = ((sw * scale_x).round() as u32).min(img_w - crop_x).max(1);
-                        let crop_h = ((sh * scale_y).round() as u32).min(img_h - crop_y).max(1);
+                            let crop_x = ((sx * scale_x).round() as u32).min(img_w.saturating_sub(1));
+                            let crop_y = ((sy * scale_y).round() as u32).min(img_h.saturating_sub(1));
+                            let crop_w = ((sw * scale_x).round() as u32).min(img_w - crop_x).max(1);
+                            let crop_h = ((sh * scale_y).round() as u32).min(img_h - crop_y).max(1);
 
-                        let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
-                        let lang = active_lang.borrow().clone();
+                            let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
+                            let lang = active_lang.borrow().clone();
 
-                        if let Ok(mut crop_words) = pipeline::run_tesseract_tsv(&DynamicImage::ImageRgba8(crop), &lang) {
-                            for w in &mut crop_words {
-                                w.x = (w.x + crop_x as f64) / scale_x;
-                                w.y = (w.y + crop_y as f64) / scale_y;
-                                w.w = w.w / scale_x;
-                                w.h = w.h / scale_y;
+                            if let Ok(mut crop_words) = pipeline::run_tesseract_tsv(&DynamicImage::ImageRgba8(crop), &lang) {
+                                for w in &mut crop_words {
+                                    w.x = (w.x + crop_x as f64) / scale_x;
+                                    w.y = (w.y + crop_y as f64) / scale_y;
+                                    w.w = w.w / scale_x;
+                                    w.h = w.h / scale_y;
+                                }
+                                *all_words.borrow_mut() = crop_words;
                             }
-                            let mut words = all_words.borrow_mut();
-                            let start_idx = words.len();
-                            let count = crop_words.len();
-                            words.extend(crop_words);
-                            *selected_indices.borrow_mut() = (start_idx..start_idx + count).collect();
-                            da.queue_draw();
                         }
+                    }
+                } else {
+                    *locked_region.borrow_mut() = None;
+                }
+                da.queue_draw();
+            } else if let Some((start, _)) = text_drag.borrow_mut().take() {
+                // If single click without drag (offset < 4px): select single word under cursor
+                if offset_x.abs() < 4.0 && offset_y.abs() < 4.0 {
+                    let words = all_words.borrow();
+                    let mut clicked_idx = None;
+                    for (i, w) in words.iter().enumerate() {
+                        if start.0 >= w.x - 2.0 && start.0 <= w.x + w.w + 2.0
+                            && start.1 >= w.y - 2.0 && start.1 <= w.y + w.h + 2.0
+                        {
+                            clicked_idx = Some(i);
+                            break;
+                        }
+                    }
+                    if let Some(idx) = clicked_idx {
+                        *selected_indices.borrow_mut() = vec![idx];
                     }
                 }
 
@@ -372,10 +467,33 @@ pub fn build_overlay_window(app: &adw::Application) {
                 if !sel_words.is_empty() {
                     *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
                 }
+                da.queue_draw();
             }
         });
     }
     drawing_area.add_controller(gesture_drag);
+
+    // --- Cursor Motion: change to I-beam "text" cursor when inside locked region ---
+    let motion = EventControllerMotion::new();
+    {
+        let locked_region = Rc::clone(&locked_region);
+        let window_weak = window.downgrade();
+        motion.connect_motion(move |_, x, y| {
+            if let Some(win) = window_weak.upgrade() {
+                let is_inside = if let Some((rx, ry, rw, rh)) = *locked_region.borrow() {
+                    x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
+                } else {
+                    false
+                };
+                if is_inside {
+                    win.set_cursor_from_name(Some("text"));
+                } else {
+                    win.set_cursor_from_name(Some("crosshair"));
+                }
+            }
+        });
+    }
+    drawing_area.add_controller(motion);
 
     // --- Bottom Floating Pill Bar ---
     let action_bar = Box::new(Orientation::Horizontal, 6);
@@ -392,22 +510,48 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
 
     // 2. Select All Button
-    let btn_select_all = create_symbolic_button("edit-select-all-symbolic", "Tüm Ekranı Seç");
+    let btn_select_all = create_symbolic_button("edit-select-all-symbolic", "Tüm Metni Seç (Ctrl+A)");
     {
         let da = drawing_area.clone();
         let all_words = Rc::clone(&all_words);
+        let locked_region = Rc::clone(&locked_region);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
 
         btn_select_all.connect_clicked(move |_| {
             let words = all_words.borrow();
-            let all_idx: Vec<usize> = (0..words.len()).collect();
-            let sel_words: Vec<&DetectedWord> = words.iter().collect();
+            let locked = *locked_region.borrow();
+            let mut all_idx = Vec::new();
+            for (i, w) in words.iter().enumerate() {
+                if let Some((rx, ry, rw, rh)) = locked {
+                    if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
+                        continue;
+                    }
+                }
+                all_idx.push(i);
+            }
+            let sel_words: Vec<&DetectedWord> = all_idx.iter().filter_map(|&i| words.get(i)).collect();
             if !sel_words.is_empty() {
                 *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
             }
             drop(words);
             *selected_indices.borrow_mut() = all_idx;
+            da.queue_draw();
+        });
+    }
+
+    // 3. Reset Region Button
+    let btn_reset_region = create_symbolic_button("view-refresh-symbolic", "Seçili Bölgeyi Sıfırla (Esc)");
+    {
+        let da = drawing_area.clone();
+        let locked_region = Rc::clone(&locked_region);
+        let selected_indices = Rc::clone(&selected_indices);
+        let cached_text = Rc::clone(&cached_text);
+
+        btn_reset_region.connect_clicked(move |_| {
+            *locked_region.borrow_mut() = None;
+            selected_indices.borrow_mut().clear();
+            *cached_text.borrow_mut() = None;
             da.queue_draw();
         });
     }
@@ -499,6 +643,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     // Pack into bottom pill bar
     action_bar.append(&btn_copy_bar);
     action_bar.append(&btn_select_all);
+    action_bar.append(&btn_reset_region);
     action_bar.append(&lang_button);
     action_bar.append(&separator);
     action_bar.append(&btn_close);
@@ -609,18 +754,56 @@ pub fn build_overlay_window(app: &adw::Application) {
         gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    // --- Key Controller: Escape = close, Ctrl+C / Enter = copy and exit ---
+    // --- Key Controller: Escape = close/deselect, Ctrl+C / Enter = copy, Ctrl+A = select all ---
     let key_controller = EventControllerKey::new();
     {
         let window_weak = window.downgrade();
         let copy_fn = copy_selection_and_finish.clone();
+        let locked_region = Rc::clone(&locked_region);
+        let selected_indices = Rc::clone(&selected_indices);
+        let cached_text = Rc::clone(&cached_text);
+        let all_words = Rc::clone(&all_words);
+        let da = drawing_area.clone();
 
         key_controller.connect_key_pressed(move |_, keyval, _, state| {
             if keyval == gdk::Key::Escape {
+                // If a region is locked or words are selected, first Escape clears them!
+                if locked_region.borrow().is_some() || !selected_indices.borrow().is_empty() {
+                    *locked_region.borrow_mut() = None;
+                    selected_indices.borrow_mut().clear();
+                    *cached_text.borrow_mut() = None;
+                    da.queue_draw();
+                    return glib::Propagation::Stop;
+                }
                 if let Some(win) = window_weak.upgrade() {
                     win.close();
                     return glib::Propagation::Stop;
                 }
+            }
+
+            // Ctrl+A: select all words in current region (or screen)
+            if state.contains(gdk::ModifierType::CONTROL_MASK)
+                && (keyval == gdk::Key::a || keyval == gdk::Key::A)
+            {
+                let words = all_words.borrow();
+                let locked = *locked_region.borrow();
+                let mut all_sel = Vec::new();
+                for (i, w) in words.iter().enumerate() {
+                    if let Some((rx, ry, rw, rh)) = locked {
+                        if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
+                            continue;
+                        }
+                    }
+                    all_sel.push(i);
+                }
+                let sel_words: Vec<&DetectedWord> = all_sel.iter().filter_map(|&i| words.get(i)).collect();
+                if !sel_words.is_empty() {
+                    *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
+                }
+                drop(words);
+                *selected_indices.borrow_mut() = all_sel;
+                da.queue_draw();
+                return glib::Propagation::Stop;
             }
 
             // Ctrl+C: copy selected text
