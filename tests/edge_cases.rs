@@ -113,3 +113,18 @@ fn test_select_in_drag_direct() {
     assert!(empty_sel.is_empty());
 }
 
+#[test]
+fn test_screenshot_37() {
+    let img_res = image::open("/home/lowell/Pictures/Screenshot-37.png");
+    if let Ok(img) = img_res {
+        let t0 = std::time::Instant::now();
+        let words = wayfrost::ocr::pipeline::run_tesseract_tsv(&img, "TR").unwrap();
+        println!(">>> Total detected words: {} in {:?}", words.len(), t0.elapsed());
+        for (i, w) in words.iter().enumerate().take(10) {
+            println!("  [{}] '{}' ({:.1}, {:.1}, {:.1}, {:.1})", i, w.text, w.x, w.y, w.w, w.h);
+        }
+    } else {
+        println!("Could not open screenshot");
+    }
+}
+
