@@ -6,7 +6,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box, Button, CssProvider, DrawingArea, EventControllerKey, GestureDrag, Image, Label,
-    Orientation, Overlay, Popover, ScrolledWindow, Separator, TextView, WrapMode,
+    Orientation, Overlay, Popover, Separator,
 };
 use image::{imageops, DynamicImage, GenericImageView};
 use libadwaita as adw;
@@ -73,10 +73,11 @@ pub fn build_overlay_window(app: &adw::Application) {
     let ocr_engine: Rc<RefCell<Option<OcrEngine>>> = Rc::new(RefCell::new(None));
     let selection = Rc::new(RefCell::new(SelectionState::default()));
     let active_lang = Rc::new(RefCell::new("TR".to_string()));
+    let cached_text: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     let root_overlay = Overlay::new();
 
-    // Fullscreen DrawingArea: paints background image 1:1 + dim scrim + live selection highlight
+    // Fullscreen DrawingArea: paints background image 1:1 + dim scrim + live text highlighter
     let drawing_area = DrawingArea::new();
     drawing_area.set_can_target(true);
     drawing_area.set_hexpand(true);
@@ -90,7 +91,7 @@ pub fn build_overlay_window(app: &adw::Application) {
             let w = width as f64;
             let h = height as f64;
 
-            // 1. Paint background screenshot 1:1
+            // 1. Paint original screenshot 1:1 with crystal clear quality
             if let Some(ref surf) = surface {
                 let surf_w = surf.width() as f64;
                 let surf_h = surf.height() as f64;
@@ -110,8 +111,8 @@ pub fn build_overlay_window(app: &adw::Application) {
 
             let s = selection.borrow();
             if let Some((sx, sy, sw, sh)) = s.normalized() {
-                // Dim 4 unselected regions around the box
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.45);
+                // Dim unselected regions around the text
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.40);
 
                 // Top
                 cr.rectangle(0.0, 0.0, w, sy);
@@ -126,13 +127,17 @@ pub fn build_overlay_window(app: &adw::Application) {
                 cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
                 let _ = cr.fill();
 
-                // While actively dragging, show subtle border (no blue fill, transparent)
-                if s.active {
-                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
-                    cr.set_line_width(1.5);
-                    cr.rectangle(sx, sy, sw, sh);
-                    let _ = cr.stroke();
-                }
+                // Live text highlighter: highlights the original screen text with a translucent blue tint
+                // (Zero duplicate text rendered on top — 100% original crystal clear text underneath!)
+                cr.set_source_rgba(0.18, 0.52, 0.92, 0.32);
+                cr.rectangle(sx, sy, sw, sh);
+                let _ = cr.fill();
+
+                // Accent border
+                cr.set_source_rgba(0.28, 0.62, 0.98, 0.95);
+                cr.set_line_width(1.5);
+                cr.rectangle(sx, sy, sw, sh);
+                let _ = cr.stroke();
             } else {
                 // Subtle scrim before any selection
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.25);
@@ -142,30 +147,6 @@ pub fn build_overlay_window(app: &adw::Application) {
         });
     }
     root_overlay.set_child(Some(&drawing_area));
-
-    // --- In-Place Selectable Text Box (Appears directly on the selected coordinates) ---
-    let in_place_textview = TextView::new();
-    in_place_textview.set_wrap_mode(WrapMode::Word);
-    in_place_textview.set_editable(false);
-    in_place_textview.set_cursor_visible(true);
-    in_place_textview.add_css_class("in-place-textview");
-
-    let in_place_scrolled = ScrolledWindow::builder()
-        .hscrollbar_policy(gtk::PolicyType::Never)
-        .vscrollbar_policy(gtk::PolicyType::Automatic)
-        .propagate_natural_height(true)
-        .propagate_natural_width(true)
-        .max_content_height(500)
-        .child(&in_place_textview)
-        .build();
-
-    let in_place_box = Box::new(Orientation::Vertical, 0);
-    in_place_box.add_css_class("in-place-box");
-    in_place_box.set_halign(Align::Start);
-    in_place_box.set_valign(Align::Start);
-    in_place_box.set_visible(false);
-    in_place_box.append(&in_place_scrolled);
-    root_overlay.add_overlay(&in_place_box);
 
     // --- Helper function: Execute OCR on selected coordinates ---
     let execute_ocr = {
@@ -214,23 +195,26 @@ pub fn build_overlay_window(app: &adw::Application) {
         }
     };
 
-    // --- Helper function: Copy text (only selected words, or all) and finish ---
+    // --- Helper function: Copy highlighted text and finish ---
     let copy_selection_and_finish = {
-        let text_view = in_place_textview.clone();
+        let cached_text = Rc::clone(&cached_text);
+        let execute_ocr = execute_ocr.clone();
         let window_weak = window.downgrade();
 
         move || {
-            let buffer = text_view.buffer();
-            let text_to_copy = if buffer.has_selection() {
-                let (start, end) = buffer.selection_bounds().unwrap();
-                buffer.text(&start, &end, true).to_string()
-            } else {
-                let start = buffer.start_iter();
-                let end = buffer.end_iter();
-                buffer.text(&start, &end, true).to_string()
+            let text_opt = cached_text.borrow().clone();
+            let text = match text_opt {
+                Some(t) => t,
+                None => match execute_ocr() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::error!("OCR error: {e}");
+                        String::new()
+                    }
+                },
             };
 
-            let trimmed = text_to_copy.trim();
+            let trimmed = text.trim();
             if !trimmed.is_empty() {
                 let _ = clipboard::copy_to_clipboard(trimmed);
                 let preview = if trimmed.len() > 60 {
@@ -244,40 +228,20 @@ pub fn build_overlay_window(app: &adw::Application) {
                     win.close();
                 }
             } else {
-                clipboard::send_notification("Wayfrost", "Kopyalanacak metin bulunamadı");
+                clipboard::send_notification("Wayfrost", "Seçilen alanda metin bulunamadı");
             }
         }
     };
 
-    // Connect Enter/Ctrl+C key on the in-place text view
-    {
-        let tv_key = EventControllerKey::new();
-        let copy_fn = copy_selection_and_finish.clone();
-        tv_key.connect_key_pressed(move |_, keyval, _, state| {
-            if state.contains(gdk::ModifierType::CONTROL_MASK)
-                && (keyval == gdk::Key::c || keyval == gdk::Key::C)
-            {
-                copy_fn();
-                return glib::Propagation::Stop;
-            }
-            if keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter {
-                copy_fn();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        in_place_textview.add_controller(tv_key);
-    }
-
-    // --- Mouse Drag Gestures for Live Screen Selection ---
+    // --- Mouse Drag Gestures: Select text live directly on the screen ---
     let gesture_drag = GestureDrag::new();
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
-        let in_place_box = in_place_box.clone();
+        let cached_text = Rc::clone(&cached_text);
 
         gesture_drag.connect_drag_begin(move |_, x, y| {
-            in_place_box.set_visible(false);
+            *cached_text.borrow_mut() = None;
             let mut s = selection.borrow_mut();
             s.start_x = x;
             s.start_y = y;
@@ -306,12 +270,11 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
-        let in_place_box = in_place_box.clone();
-        let in_place_textview = in_place_textview.clone();
         let execute_ocr = execute_ocr.clone();
+        let cached_text = Rc::clone(&cached_text);
 
         gesture_drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-            let (has_selection, rect) = {
+            let has_selection = {
                 let mut s = selection.borrow_mut();
                 if let Some((start_x, start_y)) = gesture.start_point() {
                     s.current_x = start_x + offset_x;
@@ -320,28 +283,13 @@ pub fn build_overlay_window(app: &adw::Application) {
                     s.completed = true;
                     da.queue_draw();
                 }
-                (s.normalized().is_some(), s.normalized())
+                s.normalized().is_some()
             }; // <-- mutable borrow dropped here
 
             if has_selection {
-                if let Some((sx, sy, sw, sh)) = rect {
-                    if let Ok(text) = execute_ocr() {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            let buffer = in_place_textview.buffer();
-                            buffer.set_text(trimmed);
-
-                            // Size box exactly to the user's selected area
-                            in_place_box.set_margin_start(sx as i32);
-                            in_place_box.set_margin_top(sy as i32);
-                            in_place_box.set_size_request(sw as i32, sh as i32);
-
-                            in_place_box.set_visible(true);
-                            in_place_textview.grab_focus();
-                        } else {
-                            clipboard::send_notification("Wayfrost", "Seçilen alanda metin bulunamadı");
-                        }
-                    }
+                // Background OCR: caches text so clicking Copy or pressing Enter/Ctrl+C is instant!
+                if let Ok(text) = execute_ocr() {
+                    *cached_text.borrow_mut() = Some(text);
                 }
             }
         });
@@ -353,7 +301,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     action_bar.add_css_class("floating-pill");
     action_bar.set_halign(Align::Center);
 
-    // 1. Copy Selection button
+    // 1. Copy Highlighted Text button
     let btn_copy_bar = create_symbolic_button("edit-copy-symbolic", "Seçilen Metni Kopyala (Ctrl+C / Enter)");
     {
         let copy_fn = copy_selection_and_finish.clone();
@@ -367,33 +315,24 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
-        let in_place_box = in_place_box.clone();
-        let in_place_textview = in_place_textview.clone();
         let execute_ocr = execute_ocr.clone();
+        let cached_text = Rc::clone(&cached_text);
 
         btn_select_all.connect_clicked(move |_| {
+            let (w, h) = (da.width() as f64, da.height() as f64);
             {
                 let mut s = selection.borrow_mut();
                 s.start_x = 0.0;
                 s.start_y = 0.0;
-                s.current_x = da.width() as f64;
-                s.current_y = da.height() as f64;
+                s.current_x = w;
+                s.current_y = h;
                 s.active = false;
                 s.completed = true;
             }
             da.queue_draw();
 
             if let Ok(text) = execute_ocr() {
-                let trimmed = text.trim();
-                if !trimmed.is_empty() {
-                    let buffer = in_place_textview.buffer();
-                    buffer.set_text(trimmed);
-                    in_place_box.set_margin_start(40);
-                    in_place_box.set_margin_top(40);
-                    in_place_box.set_size_request((da.width() - 80).max(200), (da.height() - 140).max(100));
-                    in_place_box.set_visible(true);
-                    in_place_textview.grab_focus();
-                }
+                *cached_text.borrow_mut() = Some(text);
             }
         });
     }
@@ -436,9 +375,11 @@ pub fn build_overlay_window(app: &adw::Application) {
         let lang_label = lang_label.clone();
         let lang_button = lang_button.clone();
         let active_lang = Rc::clone(&active_lang);
+        let cached_text = Rc::clone(&cached_text);
         let popover = popover.clone();
         btn_tr.connect_clicked(move |_| {
             *active_lang.borrow_mut() = "TR".to_string();
+            *cached_text.borrow_mut() = None;
             lang_label.set_text("TR");
             lang_button.set_tooltip_text(Some("Dil Seçimi (Aktif: Türkçe - TR)"));
             popover.popdown();
@@ -449,9 +390,11 @@ pub fn build_overlay_window(app: &adw::Application) {
         let lang_label = lang_label.clone();
         let lang_button = lang_button.clone();
         let active_lang = Rc::clone(&active_lang);
+        let cached_text = Rc::clone(&cached_text);
         let popover = popover.clone();
         btn_en.connect_clicked(move |_| {
             *active_lang.borrow_mut() = "EN".to_string();
+            *cached_text.borrow_mut() = None;
             lang_label.set_text("EN");
             lang_button.set_tooltip_text(Some("Dil Seçimi (Aktif: English - EN)"));
             popover.popdown();
@@ -506,31 +449,6 @@ pub fn build_overlay_window(app: &adw::Application) {
         "
         window.overlay-window {
             background-color: black;
-        }
-
-        /* In-place text box right over the selection - 100% transparent */
-        .in-place-box {
-            background: transparent;
-            border: 1.5px solid rgba(255, 255, 255, 0.65);
-            border-radius: 4px;
-        }
-
-        .in-place-textview {
-            background: transparent;
-            color: #ffffff;
-            font-size: 14px;
-            font-weight: 500;
-            line-height: 1.4;
-            padding: 4px 6px;
-        }
-
-        .in-place-textview:focus {
-            outline: none;
-        }
-
-        .in-place-textview text selection {
-            background-color: rgba(53, 132, 228, 0.65);
-            color: #ffffff;
         }
 
         .floating-pill {
@@ -616,7 +534,7 @@ pub fn build_overlay_window(app: &adw::Application) {
         gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    // --- Global Key Controller: Escape = close, Enter / Ctrl+C = copy and exit ---
+    // --- Key Controller: Escape = close, Ctrl+C / Enter = copy and exit ---
     let key_controller = EventControllerKey::new();
     {
         let window_weak = window.downgrade();
