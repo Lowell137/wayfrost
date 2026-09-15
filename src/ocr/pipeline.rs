@@ -245,7 +245,7 @@ pub fn run_tesseract(img: &DynamicImage, lang: &str) -> Result<String> {
 
     let tesseract_lang = match lang {
         "EN" => "eng",
-        _ => "tur+eng",
+        _ => "tur",
     };
 
     let mut child = Command::new("tesseract")

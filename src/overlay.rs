@@ -33,8 +33,8 @@ impl SelectionState {
         if !self.active && !self.completed {
             return None;
         }
-        let x = self.start_x.min(self.current_x);
-        let y = self.start_y.min(self.current_y);
+        let x = self.start_x.min(self.current_x).max(0.0);
+        let y = self.start_y.min(self.current_y).max(0.0);
         let w = (self.start_x - self.current_x).abs();
         let h = (self.start_y - self.current_y).abs();
         if w >= 4.0 && h >= 4.0 {
@@ -147,12 +147,10 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
     root_overlay.set_child(Some(&drawing_area));
 
-    // --- Floating Inline Result Card (Popup right over the selected text) ---
+    // --- Floating Inline Result Card (Popup anchored directly near selected text) ---
     let result_card = Box::new(Orientation::Vertical, 8);
     result_card.add_css_class("selection-result-card");
     result_card.set_visible(false);
-    result_card.set_valign(Align::Center);
-    result_card.set_halign(Align::Center);
 
     // Card Header
     let card_header = Box::new(Orientation::Horizontal, 8);
@@ -166,7 +164,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     let btn_copy_inline = Button::builder()
         .label("Kopyala")
         .icon_name("edit-copy-symbolic")
-        .tooltip_text("Seçilen metni panoya kopyalar (Ctrl+C / Enter)")
+        .tooltip_text("Seçilen metni kopyala (Enter / Ctrl+C)")
         .build();
     btn_copy_inline.add_css_class("suggested-action");
 
@@ -182,10 +180,10 @@ pub fn build_overlay_window(app: &adw::Application) {
 
     // Card Text View (Selectable & Editable!)
     let scrolled = ScrolledWindow::builder()
-        .min_content_height(140)
-        .max_content_height(320)
-        .min_content_width(460)
-        .max_content_width(620)
+        .min_content_height(70)
+        .max_content_height(220)
+        .min_content_width(340)
+        .max_content_width(520)
         .hexpand(true)
         .vexpand(true)
         .build();
@@ -204,14 +202,15 @@ pub fn build_overlay_window(app: &adw::Application) {
 
     // Wrap Result Card in an AdwClamp
     let card_clamp = adw::Clamp::builder()
-        .maximum_size(640)
-        .tightening_threshold(500)
+        .maximum_size(540)
+        .tightening_threshold(400)
         .child(&result_card)
         .build();
 
     let card_overlay_box = Box::new(Orientation::Vertical, 0);
-    card_overlay_box.set_valign(Align::Center);
-    card_overlay_box.set_halign(Align::Center);
+    card_overlay_box.set_valign(Align::Start);
+    card_overlay_box.set_halign(Align::Start);
+    card_overlay_box.set_visible(false);
     card_overlay_box.append(&card_clamp);
     root_overlay.add_overlay(&card_overlay_box);
 
@@ -287,10 +286,10 @@ pub fn build_overlay_window(app: &adw::Application) {
                     trimmed.to_string()
                 };
                 clipboard::send_notification("Wayfrost — Kopyalandı", &preview);
-            }
 
-            if let Some(win) = window_weak.upgrade() {
-                win.close();
+                if let Some(win) = window_weak.upgrade() {
+                    win.close();
+                }
             }
         }
     };
@@ -312,14 +311,30 @@ pub fn build_overlay_window(app: &adw::Application) {
         });
     }
 
+    // Connect Enter key inside TextView to copy_and_finish
+    {
+        let tv_key = EventControllerKey::new();
+        let copy_fn = copy_and_finish.clone();
+        tv_key.connect_key_pressed(move |_, keyval, _, _| {
+            if keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter {
+                copy_fn();
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        });
+        text_view.add_controller(tv_key);
+    }
+
     // --- Mouse Drag gestures for selection ---
     let gesture_drag = GestureDrag::new();
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
+        let card_overlay_box = card_overlay_box.clone();
         let result_card = result_card.clone();
 
         gesture_drag.connect_drag_begin(move |_, x, y| {
+            card_overlay_box.set_visible(false);
             result_card.set_visible(false);
             let mut s = selection.borrow_mut();
             s.start_x = x;
@@ -349,26 +364,55 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
+        let card_overlay_box = card_overlay_box.clone();
         let result_card = result_card.clone();
         let text_view = text_view.clone();
         let execute_ocr = execute_ocr.clone();
 
         gesture_drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-            let mut s = selection.borrow_mut();
-            if let Some((start_x, start_y)) = gesture.start_point() {
-                s.current_x = start_x + offset_x;
-                s.current_y = start_y + offset_y;
-                s.active = false;
-                s.completed = true;
-                da.queue_draw();
-            }
+            // Update selection state, then DROP the borrow before calling execute_ocr
+            let (has_selection, rect) = {
+                let mut s = selection.borrow_mut();
+                if let Some((start_x, start_y)) = gesture.start_point() {
+                    s.current_x = start_x + offset_x;
+                    s.current_y = start_y + offset_y;
+                    s.active = false;
+                    s.completed = true;
+                    da.queue_draw();
+                }
+                (s.normalized().is_some(), s.normalized())
+            }; // <-- mutable borrow dropped here
 
-            // Immediately run OCR on the selection
-            if s.normalized().is_some() {
+            if has_selection {
+                if let Some((sx, sy, _sw, sh)) = rect {
+                    let win_w = da.width() as f64;
+                    let win_h = da.height() as f64;
+
+                    let card_w = 480.0;
+                    let card_h = 180.0;
+
+                    let pos_x = sx.clamp(16.0, (win_w - card_w - 16.0).max(16.0));
+                    let pos_y = if sy + sh + card_h + 16.0 <= win_h {
+                        sy + sh + 8.0
+                    } else if sy - card_h - 8.0 >= 16.0 {
+                        sy - card_h - 8.0
+                    } else {
+                        (sy + 8.0).clamp(16.0, (win_h - card_h - 16.0).max(16.0))
+                    };
+
+                    card_overlay_box.set_margin_start(pos_x as i32);
+                    card_overlay_box.set_margin_top(pos_y as i32);
+                    card_overlay_box.set_visible(true);
+                }
+
                 match execute_ocr() {
                     Ok(text) => {
                         let trimmed = text.trim();
-                        text_view.buffer().set_text(trimmed);
+                        let buffer = text_view.buffer();
+                        buffer.set_text(trimmed);
+                        // Auto-select entire text buffer so single click / Enter copies everything
+                        let (start, end) = buffer.bounds();
+                        buffer.select_range(&start, &end);
                         result_card.set_visible(true);
                         text_view.grab_focus();
                     }
@@ -400,6 +444,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
+        let card_overlay_box = card_overlay_box.clone();
         let result_card = result_card.clone();
         let text_view = text_view.clone();
         let execute_ocr = execute_ocr.clone();
@@ -416,8 +461,16 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
             da.queue_draw();
 
+            card_overlay_box.set_margin_start(24);
+            card_overlay_box.set_margin_top(48);
+            card_overlay_box.set_visible(true);
+
             if let Ok(text) = execute_ocr() {
-                text_view.buffer().set_text(text.trim());
+                let trimmed = text.trim();
+                let buffer = text_view.buffer();
+                buffer.set_text(trimmed);
+                let (start, end) = buffer.bounds();
+                buffer.select_range(&start, &end);
                 result_card.set_visible(true);
                 text_view.grab_focus();
             }
@@ -689,9 +742,24 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
     window.add_controller(key_controller);
 
-    window.present();
-    // On GNOME Wayland the window must be mapped first before fullscreen() is honored.
+    // Set a large default size so even if fullscreen fails, the window is big
+    window.set_default_size(1920, 1080);
+
+    // Call fullscreen() before present() — needed on some compositors
     window.fullscreen();
+
+    window.present();
+
+    // Also schedule fullscreen via idle after the event loop starts — belt and suspenders
+    // for GNOME Wayland where the XDG surface may not be ready until the first frame.
+    {
+        let window_weak = window.downgrade();
+        glib::idle_add_local_once(move || {
+            if let Some(win) = window_weak.upgrade() {
+                win.fullscreen();
+            }
+        });
+    }
 }
 
 
@@ -703,17 +771,15 @@ fn image_to_cairo_surface(img: &DynamicImage) -> Result<cairo::ImageSurface> {
 
     {
         let mut data = surface.data().map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        for y in 0..h as usize {
-            for x in 0..w as usize {
-                let p = rgba.get_pixel(x as u32, y as u32);
-                let offset = (y * w as usize + x) * 4;
-                data[offset] = p[2];     // Blue
-                data[offset + 1] = p[1]; // Green
-                data[offset + 2] = p[0]; // Red
-                data[offset + 3] = 255;  // Alpha
-            }
+        let raw = rgba.as_raw();
+        for (dst, src) in data.chunks_exact_mut(4).zip(raw.chunks_exact(4)) {
+            dst[0] = src[2]; // Blue
+            dst[1] = src[1]; // Green
+            dst[2] = src[0]; // Red
+            dst[3] = 255;    // Alpha
         }
     }
+    surface.mark_dirty();
     Ok(surface)
 }
 
