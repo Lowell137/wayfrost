@@ -126,16 +126,13 @@ pub fn build_overlay_window(app: &adw::Application) {
                 cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
                 let _ = cr.fill();
 
-                // Live translucent blue text selection highlight
-                cr.set_source_rgba(0.0, 0.47, 0.84, 0.35);
-                cr.rectangle(sx, sy, sw, sh);
-                let _ = cr.fill();
-
-                // Crisp border
-                cr.set_source_rgba(0.24, 0.60, 0.98, 0.95);
-                cr.set_line_width(2.0);
-                cr.rectangle(sx, sy, sw, sh);
-                let _ = cr.stroke();
+                // While actively dragging, show subtle border (no blue fill, transparent)
+                if s.active {
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
+                    cr.set_line_width(1.5);
+                    cr.rectangle(sx, sy, sw, sh);
+                    let _ = cr.stroke();
+                }
             } else {
                 // Subtle scrim before any selection
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.25);
@@ -327,18 +324,17 @@ pub fn build_overlay_window(app: &adw::Application) {
             }; // <-- mutable borrow dropped here
 
             if has_selection {
-                if let Some((sx, sy, sw, _sh)) = rect {
+                if let Some((sx, sy, sw, sh)) = rect {
                     if let Ok(text) = execute_ocr() {
                         let trimmed = text.trim();
                         if !trimmed.is_empty() {
                             let buffer = in_place_textview.buffer();
                             buffer.set_text(trimmed);
 
-                            // Set position & size right over the selected area!
+                            // Size box exactly to the user's selected area
                             in_place_box.set_margin_start(sx as i32);
                             in_place_box.set_margin_top(sy as i32);
-                            let target_w = (sw as i32).max(180);
-                            in_place_box.set_size_request(target_w, -1);
+                            in_place_box.set_size_request(sw as i32, sh as i32);
 
                             in_place_box.set_visible(true);
                             in_place_textview.grab_focus();
@@ -512,13 +508,11 @@ pub fn build_overlay_window(app: &adw::Application) {
             background-color: black;
         }
 
-        /* In-place text box right over the selection */
+        /* In-place text box right over the selection - 100% transparent */
         .in-place-box {
-            background: rgba(18, 18, 22, 0.90);
-            border: 2px solid #3584e4;
-            border-radius: 6px;
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.7);
-            backdrop-filter: blur(12px);
+            background: transparent;
+            border: 1.5px solid rgba(255, 255, 255, 0.65);
+            border-radius: 4px;
         }
 
         .in-place-textview {
@@ -527,11 +521,16 @@ pub fn build_overlay_window(app: &adw::Application) {
             font-size: 14px;
             font-weight: 500;
             line-height: 1.4;
-            padding: 4px 8px;
+            padding: 4px 6px;
         }
 
         .in-place-textview:focus {
             outline: none;
+        }
+
+        .in-place-textview text selection {
+            background-color: rgba(53, 132, 228, 0.65);
+            color: #ffffff;
         }
 
         .floating-pill {
