@@ -360,9 +360,11 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
             let width = parts[8].parse::<f64>().unwrap_or(0.0) / scale;
             let height = parts[9].parse::<f64>().unwrap_or(0.0) / scale;
 
+            let conf = parts[10].parse::<f32>().unwrap_or(0.0);
+
             if level == "5" {
                 let text = parts[11].trim().to_string();
-                if !text.is_empty() {
+                if !text.is_empty() && width >= 4.0 && height >= 6.0 && conf >= 15.0 {
                     words.push(DetectedWord {
                         x: left,
                         y: top,
@@ -378,54 +380,239 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
         }
     }
 
-    // Sort words by line and x-coordinate
-    words.sort_by(|a, b| {
-        (a.block_num, a.par_num, a.line_num)
-            .cmp(&(b.block_num, b.par_num, b.line_num))
-            .then_with(|| a.x.total_cmp(&b.x))
-    });
-
-    // Fix overlapping and crushed word bounding boxes on the same line
-    if words.len() > 1 {
-        for i in 0..words.len() - 1 {
-            let same_line = words[i].block_num == words[i + 1].block_num
-                && words[i].par_num == words[i + 1].par_num
-                && words[i].line_num == words[i + 1].line_num;
-
-            if same_line {
-                let next_x = words[i + 1].x;
-                if words[i].x + words[i].w >= next_x {
-                    words[i].w = (next_x - 1.0 - words[i].x).max(1.0);
+    // Deduplicate overlapping boxes (NMS):
+    // If two words overlap by > 50% of either word's area and their vertical centers are aligned,
+    // keep the one with larger area or earlier detection.
+    let mut clean_words: Vec<DetectedWord> = Vec::with_capacity(words.len());
+    for w in words {
+        let mut dup = false;
+        let w_area = w.w * w.h;
+        for existing in clean_words.iter() {
+            let ox = (w.x + w.w).min(existing.x + existing.w) - w.x.max(existing.x);
+            let oy = (w.y + w.h).min(existing.y + existing.h) - w.y.max(existing.y);
+            if ox > 0.0 && oy > 0.0 {
+                let inter_area = ox * oy;
+                let min_area = w_area.min(existing.w * existing.h);
+                if min_area > 0.0 && (inter_area / min_area) > 0.50 {
+                    dup = true;
+                    break;
                 }
             }
         }
+        if !dup {
+            clean_words.push(w);
+        }
     }
+    let mut words = clean_words;
+
+    // Sort words by visual reading order (top-to-bottom, left-to-right)
+    words.sort_by(|a, b| {
+        let cy_a = a.y + a.h / 2.0;
+        let cy_b = b.y + b.h / 2.0;
+        let line_h = a.h.max(b.h);
+        if (cy_a - cy_b).abs() < line_h * 0.45 {
+            a.x.total_cmp(&b.x)
+        } else {
+            cy_a.total_cmp(&cy_b)
+        }
+    });
 
     Ok(words)
 }
 
+/// Formats detected words into clean text using visual line and paragraph breaks
 pub fn join_words(words: &[&DetectedWord]) -> String {
-    let mut result = String::new();
-    let mut last_block = None;
-    let mut last_par = None;
-    let mut last_line = None;
+    if words.is_empty() {
+        return String::new();
+    }
 
-    for w in words {
-        if let Some(lb) = last_block {
-            if w.block_num != lb || w.par_num != last_par.unwrap_or(0) {
+    let mut result = String::new();
+    for (i, w) in words.iter().enumerate() {
+        if i == 0 {
+            result.push_str(&w.text);
+            continue;
+        }
+        let prev = words[i - 1];
+        let prev_cy = prev.y + prev.h / 2.0;
+        let curr_cy = w.y + w.h / 2.0;
+        let line_h = prev.h.max(w.h);
+
+        if (curr_cy - prev_cy).abs() < line_h * 0.50 {
+            // Same visual line
+            result.push(' ');
+        } else {
+            // New visual line: check for paragraph gap
+            let y_gap = w.y - (prev.y + prev.h);
+            if y_gap > line_h * 0.85 {
                 result.push_str("\n\n");
-            } else if w.line_num != last_line.unwrap_or(0) {
-                result.push('\n');
             } else {
-                result.push(' ');
+                result.push('\n');
             }
         }
         result.push_str(&w.text);
-        last_block = Some(w.block_num);
-        last_par = Some(w.par_num);
-        last_line = Some(w.line_num);
     }
 
     result
+}
+
+/// Clusters word indices into visual lines ordered top-to-bottom,
+/// and left-to-right within each line.
+pub fn cluster_words_into_lines(words: &[DetectedWord], candidates: &[usize]) -> Vec<Vec<usize>> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sorted_indices = candidates.to_vec();
+    sorted_indices.sort_by(|&a, &b| {
+        let cy_a = words[a].y + words[a].h / 2.0;
+        let cy_b = words[b].y + words[b].h / 2.0;
+        cy_a.total_cmp(&cy_b)
+    });
+
+    struct LineGroup {
+        y_min: f64,
+        y_max: f64,
+        cy: f64,
+        members: Vec<usize>,
+    }
+
+    let mut lines: Vec<LineGroup> = Vec::new();
+
+    for idx in sorted_indices {
+        let w = &words[idx];
+        let cy = w.y + w.h / 2.0;
+        let h = w.h;
+
+        let mut placed = false;
+        for line in lines.iter_mut() {
+            let line_h = line.y_max - line.y_min;
+            let threshold = h.max(line_h) * 0.55;
+            if (cy - line.cy).abs() < threshold {
+                line.members.push(idx);
+                line.y_min = line.y_min.min(w.y);
+                line.y_max = line.y_max.max(w.y + w.h);
+                let count = line.members.len() as f64;
+                line.cy = line.members.iter().map(|&i| words[i].y + words[i].h / 2.0).sum::<f64>() / count;
+                placed = true;
+                break;
+            }
+        }
+
+        if !placed {
+            lines.push(LineGroup {
+                y_min: w.y,
+                y_max: w.y + w.h,
+                cy,
+                members: vec![idx],
+            });
+        }
+    }
+
+    lines.sort_by(|a, b| a.y_min.total_cmp(&b.y_min));
+
+    let mut result = Vec::with_capacity(lines.len());
+    for mut line in lines {
+        line.members.sort_by(|&a, &b| words[a].x.total_cmp(&words[b].x));
+        result.push(line.members);
+    }
+
+    result
+}
+
+fn get_word_at_point(
+    x: f64,
+    y: f64,
+    lines: &[Vec<usize>],
+    words: &[DetectedWord],
+) -> (usize, usize) {
+    if lines.is_empty() {
+        return (0, 0);
+    }
+
+    // 1. Find line closest to y
+    let mut best_li = 0;
+    let mut best_dist_y = f64::INFINITY;
+
+    for (li, line) in lines.iter().enumerate() {
+        let mut y_min = f64::INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        for &idx in line {
+            let w = &words[idx];
+            y_min = y_min.min(w.y);
+            y_max = y_max.max(w.y + w.h);
+        }
+
+        if y >= y_min && y <= y_max {
+            best_li = li;
+            break;
+        }
+
+        let dist = if y < y_min { y_min - y } else { y - y_max };
+        if dist < best_dist_y {
+            best_dist_y = dist;
+            best_li = li;
+        }
+    }
+
+    let line = &lines[best_li];
+    if line.is_empty() {
+        return (best_li, 0);
+    }
+
+    // 2. Find word on that line closest to x
+    let mut best_wi = 0;
+    let mut best_dist_x = f64::INFINITY;
+
+    for (wi, &idx) in line.iter().enumerate() {
+        let w = &words[idx];
+        if x >= w.x && x <= w.x + w.w {
+            return (best_li, wi);
+        }
+        let dist = if x < w.x { w.x - x } else { x - (w.x + w.w) };
+        if dist < best_dist_x {
+            best_dist_x = dist;
+            best_wi = wi;
+        }
+    }
+
+    (best_li, best_wi)
+}
+
+/// Selects words in natural reading stream order between start_pt and curr_pt.
+pub fn select_words_stream(
+    start_pt: (f64, f64),
+    curr_pt: (f64, f64),
+    lines: &[Vec<usize>],
+    words: &[DetectedWord],
+) -> Vec<usize> {
+    if lines.is_empty() {
+        return Vec::new();
+    }
+
+    let (s_li, s_wi) = get_word_at_point(start_pt.0, start_pt.1, lines, words);
+    let (c_li, c_wi) = get_word_at_point(curr_pt.0, curr_pt.1, lines, words);
+
+    let forward = s_li < c_li || (s_li == c_li && s_wi <= c_wi);
+
+    let (from_li, from_wi, to_li, to_wi) = if forward {
+        (s_li, s_wi, c_li, c_wi)
+    } else {
+        (c_li, c_wi, s_li, s_wi)
+    };
+
+    let mut selected = Vec::new();
+    for li in from_li..=to_li {
+        let line = &lines[li];
+        let start_w = if li == from_li { from_wi } else { 0 };
+        let end_w = if li == to_li { to_wi } else { line.len() - 1 };
+
+        for wi in start_w..=end_w {
+            if let Some(&idx) = line.get(wi) {
+                selected.push(idx);
+            }
+        }
+    }
+
+    selected
 }
 

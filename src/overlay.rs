@@ -243,16 +243,23 @@ pub fn build_overlay_window(app: &adw::Application) {
                 if !sel_words.is_empty() {
                     text = pipeline::join_words(&sel_words);
                 } else if let Some((rx, ry, rw, rh)) = locked {
-                    // Copy all words inside persistent selection frame
-                    let region_words: Vec<&DetectedWord> = words
-                        .iter()
-                        .filter(|w| !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh))
+                    // Copy all words inside persistent selection frame in true reading order
+                    let candidates: Vec<usize> = (0..words.len())
+                        .filter(|&i| {
+                            let w = &words[i];
+                            !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
+                        })
                         .collect();
-                    if !region_words.is_empty() {
-                        text = pipeline::join_words(&region_words);
+                    let lines = pipeline::cluster_words_into_lines(&words, &candidates);
+                    let ordered: Vec<&DetectedWord> = lines.into_iter().flatten().filter_map(|i| words.get(i)).collect();
+                    if !ordered.is_empty() {
+                        text = pipeline::join_words(&ordered);
                     }
                 } else if !words.is_empty() {
-                    text = pipeline::join_words(&words.iter().collect::<Vec<_>>());
+                    let candidates: Vec<usize> = (0..words.len()).collect();
+                    let lines = pipeline::cluster_words_into_lines(&words, &candidates);
+                    let ordered: Vec<&DetectedWord> = lines.into_iter().flatten().filter_map(|i| words.get(i)).collect();
+                    text = pipeline::join_words(&ordered);
                 }
                 drop(words);
             }
@@ -344,10 +351,22 @@ pub fn build_overlay_window(app: &adw::Application) {
             floating_copy_btn.set_visible(false);
 
             let current_locked = { *locked_region.borrow() };
+            let is_inside_locked = if let Some((rx, ry, rw, rh)) = current_locked {
+                start_x >= rx - 8.0 && start_x <= rx + rw + 8.0
+                    && start_y >= ry - 8.0 && start_y <= ry + rh + 8.0
+            } else {
+                false
+            };
+
             let clicked_word_idx = {
                 let words = all_words.borrow();
                 let mut found = None;
                 for (i, w) in words.iter().enumerate() {
+                    if let Some((rx, ry, rw, rh)) = current_locked {
+                        if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
+                            continue;
+                        }
+                    }
                     if start_x >= w.x - 4.0 && start_x <= w.x + w.w + 4.0
                         && start_y >= w.y - 4.0 && start_y <= w.y + w.h + 4.0
                     {
@@ -358,16 +377,9 @@ pub fn build_overlay_window(app: &adw::Application) {
                 found
             };
             let is_on_bounding_box = clicked_word_idx.is_some();
-            let is_inside_locked = if let Some((rx, ry, rw, rh)) = current_locked {
-                start_x >= rx - 12.0 && start_x <= rx + rw + 12.0
-                    && start_y >= ry - 12.0 && start_y <= ry + rh + 12.0
-            } else {
-                false
-            };
 
-            if current_locked.is_some() && (is_inside_locked || is_on_bounding_box) {
+            if current_locked.is_some() && is_inside_locked {
                 // Dragging/clicking INSIDE the persistent selection rectangle -> Text Selection
-                // Does NOT start a new outer frame!
                 *text_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
                 *framing_drag.borrow_mut() = None;
                 if let Some(idx) = clicked_word_idx {
@@ -411,30 +423,24 @@ pub fn build_overlay_window(app: &adw::Application) {
                 let current = (start.0 + offset_x, start.1 + offset_y);
                 *text_drag.borrow_mut() = Some((start, current));
 
-                let min_x = start.0.min(current.0);
-                let max_x = start.0.max(current.0);
-                let min_y = start.1.min(current.1) - 4.0;
-                let max_y = start.1.max(current.1) + 4.0;
-
                 let locked = { *locked_region.borrow() };
                 let new_sel = {
                     let words = all_words.borrow();
-                    let mut sel = Vec::new();
-                    for (i, w) in words.iter().enumerate() {
-                        if let Some((rx, ry, rw, rh)) = locked {
-                            if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
-                                continue;
-                            }
-                        }
-                        let (wx2, wy2) = (w.x + w.w, w.y + w.h);
-                        if !(wx2 < min_x || w.x > max_x || wy2 < min_y || w.y > max_y) {
-                            sel.push(i);
-                        }
-                    }
-                    sel
+                    let candidates: Vec<usize> = if let Some((rx, ry, rw, rh)) = locked {
+                        (0..words.len())
+                            .filter(|&i| {
+                                let w = &words[i];
+                                !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
+                            })
+                            .collect()
+                    } else {
+                        (0..words.len()).collect()
+                    };
+
+                    let lines = pipeline::cluster_words_into_lines(&words, &candidates);
+                    pipeline::select_words_stream(start, current, &lines, &words)
                 };
 
-                // Only queue redraw when selection changes to prevent frame drops
                 let changed = { selected_indices.borrow().as_slice() != new_sel.as_slice() };
                 if changed {
                     *selected_indices.borrow_mut() = new_sel;
@@ -473,6 +479,8 @@ pub fn build_overlay_window(app: &adw::Application) {
                 if sw >= 12.0 && sh >= 12.0 {
                     // PERSISTENT SELECTION RECTANGLE!
                     *locked_region.borrow_mut() = Some((sx, sy, sw, sh));
+                    selected_indices.borrow_mut().clear();
+                    *cached_text.borrow_mut() = None;
                     schedule_tooltip(current.0, current.1);
                 } else {
                     // Click in open space without dragging a box:
@@ -493,11 +501,17 @@ pub fn build_overlay_window(app: &adw::Application) {
                     let sh = (start.1 - current.1).abs();
 
                     if sw < 4.0 && sh < 4.0 {
-                        // Single click inside region: select single word under cursor
+                        // Single click: select single word under cursor, or clear if in empty margin
+                        let locked = { *locked_region.borrow() };
                         let clicked = {
                             let words = all_words.borrow();
                             let mut found = None;
                             for (i, w) in words.iter().enumerate() {
+                                if let Some((rx, ry, rw, rh)) = locked {
+                                    if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
+                                        continue;
+                                    }
+                                }
                                 if start.0 >= w.x - 4.0 && start.0 <= w.x + w.w + 4.0
                                     && start.1 >= w.y - 4.0 && start.1 <= w.y + w.h + 4.0
                                 {
@@ -509,6 +523,8 @@ pub fn build_overlay_window(app: &adw::Application) {
                         };
                         if let Some(idx) = clicked {
                             *selected_indices.borrow_mut() = vec![idx];
+                        } else {
+                            selected_indices.borrow_mut().clear();
                         }
                     }
 
@@ -545,9 +561,14 @@ pub fn build_overlay_window(app: &adw::Application) {
         let window_weak = window.downgrade();
         motion.connect_motion(move |_, x, y| {
             if let Some(win) = window_weak.upgrade() {
+                let locked = { *locked_region.borrow() };
+                let is_inside_locked = if let Some((rx, ry, rw, rh)) = locked {
+                    x >= rx - 4.0 && x <= rx + rw + 4.0 && y >= ry - 4.0 && y <= ry + rh + 4.0
+                } else {
+                    false
+                };
                 let is_over_word = {
                     let words = all_words.borrow();
-                    let locked = *locked_region.borrow();
                     words.iter().any(|w| {
                         if let Some((rx, ry, rw, rh)) = locked {
                             if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
@@ -558,7 +579,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                     })
                 };
                 let is_text_dragging = { text_drag.borrow().is_some() };
-                let desired_cursor = if is_over_word || is_text_dragging {
+                let desired_cursor = if is_inside_locked || is_over_word || is_text_dragging {
                     "text"
                 } else {
                     "crosshair"
@@ -607,7 +628,7 @@ pub fn build_overlay_window(app: &adw::Application) {
             let locked = { *locked_region.borrow() };
             let (all_idx, text_opt) = {
                 let words = all_words.borrow();
-                let idxs: Vec<usize> = if let Some((rx, ry, rw, rh)) = locked {
+                let candidates: Vec<usize> = if let Some((rx, ry, rw, rh)) = locked {
                     (0..words.len())
                         .filter(|&i| {
                             let w = &words[i];
@@ -617,6 +638,8 @@ pub fn build_overlay_window(app: &adw::Application) {
                 } else {
                     (0..words.len()).collect()
                 };
+                let lines = pipeline::cluster_words_into_lines(&words, &candidates);
+                let idxs: Vec<usize> = lines.into_iter().flatten().collect();
                 let sel_words: Vec<&DetectedWord> = idxs.iter().filter_map(|&i| words.get(i)).collect();
                 let txt = if !sel_words.is_empty() {
                     Some(pipeline::join_words(&sel_words))
@@ -964,7 +987,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                 let locked = { *locked_region.borrow() };
                 let (all_sel, text_opt) = {
                     let words = all_words.borrow();
-                    let sel: Vec<usize> = if let Some((rx, ry, rw, rh)) = locked {
+                    let candidates: Vec<usize> = if let Some((rx, ry, rw, rh)) = locked {
                         (0..words.len())
                             .filter(|&i| {
                                 let w = &words[i];
@@ -974,6 +997,8 @@ pub fn build_overlay_window(app: &adw::Application) {
                     } else {
                         (0..words.len()).collect()
                     };
+                    let lines = pipeline::cluster_words_into_lines(&words, &candidates);
+                    let sel: Vec<usize> = lines.into_iter().flatten().collect();
 
                     let sel_words: Vec<&DetectedWord> =
                         sel.iter().filter_map(|&i| words.get(i)).collect();
