@@ -6,7 +6,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box, Button, CssProvider, DrawingArea, EventControllerKey, GestureDrag, Image, Label,
-    Orientation, Overlay, Popover, ScrolledWindow, Separator, TextView, WrapMode,
+    Orientation, Overlay, Popover, Separator,
 };
 use image::{imageops, DynamicImage, GenericImageView};
 use libadwaita as adw;
@@ -73,6 +73,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     let ocr_engine: Rc<RefCell<Option<OcrEngine>>> = Rc::new(RefCell::new(None));
     let selection = Rc::new(RefCell::new(SelectionState::default()));
     let active_lang = Rc::new(RefCell::new("TR".to_string()));
+    let cached_text: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
     let root_overlay = Overlay::new();
 
@@ -146,128 +147,6 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
     root_overlay.set_child(Some(&drawing_area));
 
-    // --- Floating Selection Card (Appears right on the selected area with Copy Icon) ---
-    let selection_card = Box::new(Orientation::Vertical, 6);
-    selection_card.add_css_class("win11-selection-card");
-
-    // Header: Title + Copy Button + Close
-    let card_header = Box::new(Orientation::Horizontal, 8);
-    let card_icon = Image::from_icon_name("edit-select-all-symbolic");
-    card_icon.set_pixel_size(16);
-    let card_title = Label::new(Some("Seçilen Metin"));
-    card_title.add_css_class("win11-card-title");
-    card_title.set_hexpand(true);
-    card_title.set_halign(Align::Start);
-
-    let btn_copy = Button::builder()
-        .icon_name("edit-copy-symbolic")
-        .label("Kopyala")
-        .tooltip_text("Metni panoya kopyalar (Ctrl+C / Enter)")
-        .build();
-    btn_copy.add_css_class("win11-copy-btn");
-
-    let btn_close_card = Button::from_icon_name("window-close-symbolic");
-    btn_close_card.set_tooltip_text(Some("Kapat (Esc)"));
-    btn_close_card.add_css_class("win11-close-btn");
-
-    card_header.append(&card_icon);
-    card_header.append(&card_title);
-    card_header.append(&btn_copy);
-    card_header.append(&btn_close_card);
-    selection_card.append(&card_header);
-
-    // Scrolled TextView: Selectable & Editable text from the recognized area
-    let scrolled = ScrolledWindow::builder()
-        .min_content_height(60)
-        .max_content_height(200)
-        .min_content_width(320)
-        .max_content_width(480)
-        .hexpand(true)
-        .vexpand(true)
-        .build();
-    let text_view = TextView::new();
-    text_view.set_wrap_mode(WrapMode::Word);
-    text_view.set_monospace(false);
-    text_view.add_css_class("win11-card-textview");
-    scrolled.set_child(Some(&text_view));
-    selection_card.append(&scrolled);
-
-    let card_hint = Label::new(Some("💡 İstediğiniz kısmı seçip Kopyala'ya tıklayın veya doğrudan Enter'a basın."));
-    card_hint.add_css_class("win11-card-hint");
-    card_hint.set_halign(Align::Start);
-    selection_card.append(&card_hint);
-
-    let card_box = Box::new(Orientation::Vertical, 0);
-    card_box.set_valign(Align::Start);
-    card_box.set_halign(Align::Start);
-    card_box.set_visible(false);
-    card_box.append(&selection_card);
-    root_overlay.add_overlay(&card_box);
-
-    // --- Helper function: Copy text (selected part or all) and close ---
-    let copy_and_finish = {
-        let text_view = text_view.clone();
-        let window_weak = window.downgrade();
-
-        move || {
-            let buffer = text_view.buffer();
-            let text_to_copy = if buffer.has_selection() {
-                let (start, end) = buffer.selection_bounds().unwrap();
-                buffer.text(&start, &end, true).to_string()
-            } else {
-                let start = buffer.start_iter();
-                let end = buffer.end_iter();
-                buffer.text(&start, &end, true).to_string()
-            };
-
-            let trimmed = text_to_copy.trim();
-            if !trimmed.is_empty() {
-                let _ = clipboard::copy_to_clipboard(trimmed);
-                let preview = if trimmed.len() > 60 {
-                    format!("{}...", &trimmed[..60])
-                } else {
-                    trimmed.to_string()
-                };
-                clipboard::send_notification("Wayfrost — Kopyalandı", &preview);
-
-                if let Some(win) = window_weak.upgrade() {
-                    win.close();
-                }
-            }
-        }
-    };
-
-    // Connect Copy and Close in Card
-    {
-        let copy_fn = copy_and_finish.clone();
-        btn_copy.connect_clicked(move |_| {
-            copy_fn();
-        });
-    }
-
-    {
-        let window_weak = window.downgrade();
-        btn_close_card.connect_clicked(move |_| {
-            if let Some(win) = window_weak.upgrade() {
-                win.close();
-            }
-        });
-    }
-
-    // Connect Enter key inside TextView to copy_and_finish
-    {
-        let tv_key = EventControllerKey::new();
-        let copy_fn = copy_and_finish.clone();
-        tv_key.connect_key_pressed(move |_, keyval, _, _| {
-            if keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter {
-                copy_fn();
-                return glib::Propagation::Stop;
-            }
-            glib::Propagation::Proceed
-        });
-        text_view.add_controller(tv_key);
-    }
-
     // --- Helper function: Execute OCR on selected coordinates ---
     let execute_ocr = {
         let screen_img = screen_img.clone();
@@ -315,15 +194,53 @@ pub fn build_overlay_window(app: &adw::Application) {
         }
     };
 
+    // --- Helper function: Copy text from the active selection and exit ---
+    let copy_selection_and_finish = {
+        let cached_text = Rc::clone(&cached_text);
+        let execute_ocr = execute_ocr.clone();
+        let window_weak = window.downgrade();
+
+        move || {
+            let text_opt = cached_text.borrow().clone();
+            let text = match text_opt {
+                Some(t) => t,
+                None => match execute_ocr() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        log::error!("OCR error: {e}");
+                        String::new()
+                    }
+                },
+            };
+
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                let _ = clipboard::copy_to_clipboard(trimmed);
+                let preview = if trimmed.len() > 60 {
+                    format!("{}...", &trimmed[..60])
+                } else {
+                    trimmed.to_string()
+                };
+                clipboard::send_notification("Wayfrost — Kopyalandı", &preview);
+
+                if let Some(win) = window_weak.upgrade() {
+                    win.close();
+                }
+            } else {
+                clipboard::send_notification("Wayfrost", "Seçilen alanda metin bulunamadı");
+            }
+        }
+    };
+
     // --- Mouse Drag Gestures for Live Screen Selection ---
     let gesture_drag = GestureDrag::new();
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
-        let card_box = card_box.clone();
+        let cached_text = Rc::clone(&cached_text);
 
         gesture_drag.connect_drag_begin(move |_, x, y| {
-            card_box.set_visible(false);
+            *cached_text.borrow_mut() = None;
             let mut s = selection.borrow_mut();
             s.start_x = x;
             s.start_y = y;
@@ -352,12 +269,11 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
-        let card_box = card_box.clone();
-        let text_view = text_view.clone();
         let execute_ocr = execute_ocr.clone();
+        let cached_text = Rc::clone(&cached_text);
 
         gesture_drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-            let (has_selection, rect) = {
+            let has_selection = {
                 let mut s = selection.borrow_mut();
                 if let Some((start_x, start_y)) = gesture.start_point() {
                     s.current_x = start_x + offset_x;
@@ -366,64 +282,67 @@ pub fn build_overlay_window(app: &adw::Application) {
                     s.completed = true;
                     da.queue_draw();
                 }
-                (s.normalized().is_some(), s.normalized())
-            }; // <-- mutable borrow is dropped immediately here
+                s.normalized().is_some()
+            }; // <-- mutable borrow dropped here
 
             if has_selection {
-                if let Some((sx, sy, _sw, sh)) = rect {
-                    let win_w = da.width() as f64;
-                    let win_h = da.height() as f64;
-                    let card_w = 400.0;
-                    let card_h = 160.0;
-
-                    // Position directly near the selection (below if fits, otherwise above)
-                    let pos_x = sx.clamp(12.0, (win_w - card_w - 12.0).max(12.0));
-                    let pos_y = if sy + sh + card_h + 12.0 <= win_h {
-                        sy + sh + 6.0
-                    } else if sy - card_h - 6.0 >= 12.0 {
-                        sy - card_h - 6.0
-                    } else {
-                        (sy + 6.0).clamp(12.0, (win_h - card_h - 12.0).max(12.0))
-                    };
-
-                    card_box.set_margin_start(pos_x as i32);
-                    card_box.set_margin_top(pos_y as i32);
-                    card_box.set_visible(true);
-                }
-
-                match execute_ocr() {
-                    Ok(text) => {
-                        let trimmed = text.trim();
-                        let buffer = text_view.buffer();
-                        buffer.set_text(trimmed);
-                        // Auto-select all text in the box so user can immediately copy with 1 click,
-                        // or drag with mouse to select only specific words!
-                        let (start, end) = buffer.bounds();
-                        buffer.select_range(&start, &end);
-                        text_view.grab_focus();
-                    }
-                    Err(e) => {
-                        log::error!("OCR error: {e}");
-                    }
+                // Pre-extract text in background so Enter / Kopyala is instant
+                if let Ok(text) = execute_ocr() {
+                    *cached_text.borrow_mut() = Some(text);
                 }
             }
         });
     }
     drawing_area.add_controller(gesture_drag);
 
-    // --- Top Center Floating Bar (Language switch & Close) ---
-    let topbar = Box::new(Orientation::Horizontal, 8);
-    topbar.add_css_class("win11-topbar");
-    topbar.set_halign(Align::Center);
+    // --- Bottom Floating Pill Bar (Restored to Bottom Position) ---
+    let action_bar = Box::new(Orientation::Horizontal, 6);
+    action_bar.add_css_class("floating-pill");
+    action_bar.set_halign(Align::Center);
 
-    // Language Switcher (Popover: TR / EN)
+    // 1. Copy Selection button
+    let btn_copy_bar = create_symbolic_button("edit-copy-symbolic", "Seçilen Metni Kopyala (Enter / Ctrl+C)");
+    {
+        let copy_fn = copy_selection_and_finish.clone();
+        btn_copy_bar.connect_clicked(move |_| {
+            copy_fn();
+        });
+    }
+
+    // 2. Select All Button
+    let btn_select_all = create_symbolic_button("edit-select-all-symbolic", "Tüm Ekranı Seç");
+    {
+        let selection = Rc::clone(&selection);
+        let da = drawing_area.clone();
+        let execute_ocr = execute_ocr.clone();
+        let cached_text = Rc::clone(&cached_text);
+
+        btn_select_all.connect_clicked(move |_| {
+            {
+                let mut s = selection.borrow_mut();
+                s.start_x = 0.0;
+                s.start_y = 0.0;
+                s.current_x = da.width() as f64;
+                s.current_y = da.height() as f64;
+                s.active = false;
+                s.completed = true;
+            }
+            da.queue_draw();
+
+            if let Ok(text) = execute_ocr() {
+                *cached_text.borrow_mut() = Some(text);
+            }
+        });
+    }
+
+    // 3. Language Switcher (Popover: TR / EN)
     let lang_button = Button::new();
     lang_button.set_tooltip_text(Some("Dil Seçimi (Aktif: Türkçe - TR)"));
-    lang_button.add_css_class("win11-topbar-btn");
+    lang_button.add_css_class("pill-btn");
 
     let lang_box = Box::new(Orientation::Horizontal, 4);
     let lang_icon = Image::from_icon_name("preferences-desktop-locale-symbolic");
-    lang_icon.set_pixel_size(16);
+    lang_icon.set_pixel_size(18);
     let lang_label = Label::new(Some("TR"));
     lang_label.add_css_class("lang-badge");
     lang_box.append(&lang_icon);
@@ -454,9 +373,11 @@ pub fn build_overlay_window(app: &adw::Application) {
         let lang_label = lang_label.clone();
         let lang_button = lang_button.clone();
         let active_lang = Rc::clone(&active_lang);
+        let cached_text = Rc::clone(&cached_text);
         let popover = popover.clone();
         btn_tr.connect_clicked(move |_| {
             *active_lang.borrow_mut() = "TR".to_string();
+            *cached_text.borrow_mut() = None;
             lang_label.set_text("TR");
             lang_button.set_tooltip_text(Some("Dil Seçimi (Aktif: Türkçe - TR)"));
             popover.popdown();
@@ -467,9 +388,11 @@ pub fn build_overlay_window(app: &adw::Application) {
         let lang_label = lang_label.clone();
         let lang_button = lang_button.clone();
         let active_lang = Rc::clone(&active_lang);
+        let cached_text = Rc::clone(&cached_text);
         let popover = popover.clone();
         btn_en.connect_clicked(move |_| {
             *active_lang.borrow_mut() = "EN".to_string();
+            *cached_text.borrow_mut() = None;
             lang_label.set_text("EN");
             lang_button.set_tooltip_text(Some("Dil Seçimi (Aktif: English - EN)"));
             popover.popdown();
@@ -480,13 +403,13 @@ pub fn build_overlay_window(app: &adw::Application) {
     popover_vbox.append(&btn_en);
     popover.set_child(Some(&popover_vbox));
 
+    // Separator before close
     let separator = Separator::new(Orientation::Vertical);
-    separator.add_css_class("topbar-separator");
+    separator.add_css_class("pill-separator");
 
     // Close button
-    let btn_close = Button::from_icon_name("window-close-symbolic");
-    btn_close.set_tooltip_text(Some("Kapat (Esc)"));
-    btn_close.add_css_class("win11-topbar-btn");
+    let btn_close = create_symbolic_button("window-close-symbolic", "Kapat (Esc)");
+    btn_close.add_css_class("destructive");
     {
         let window_weak = window.downgrade();
         btn_close.connect_clicked(move |_| {
@@ -496,17 +419,26 @@ pub fn build_overlay_window(app: &adw::Application) {
         });
     }
 
-    topbar.append(&lang_button);
-    topbar.append(&separator);
-    topbar.append(&btn_close);
+    // Pack into bottom pill bar
+    action_bar.append(&btn_copy_bar);
+    action_bar.append(&btn_select_all);
+    action_bar.append(&lang_button);
+    action_bar.append(&separator);
+    action_bar.append(&btn_close);
 
-    let top_box = Box::new(Orientation::Vertical, 0);
-    top_box.set_valign(Align::Start);
-    top_box.set_halign(Align::Center);
-    top_box.set_margin_top(16);
-    top_box.append(&topbar);
+    let bar_clamp = adw::Clamp::builder()
+        .maximum_size(480)
+        .tightening_threshold(380)
+        .child(&action_bar)
+        .build();
 
-    root_overlay.add_overlay(&top_box);
+    let bottom_box = Box::new(Orientation::Vertical, 0);
+    bottom_box.set_valign(Align::End);
+    bottom_box.set_halign(Align::Fill);
+    bottom_box.set_margin_bottom(28);
+    bottom_box.append(&bar_clamp);
+
+    root_overlay.add_overlay(&bottom_box);
     window.set_child(Some(&root_overlay));
 
     // --- CSS Styles ---
@@ -517,94 +449,38 @@ pub fn build_overlay_window(app: &adw::Application) {
             background-color: black;
         }
 
-        /* Selection Card (placed directly at the selected area) */
-        .win11-selection-card {
-            background: rgba(28, 28, 32, 0.96);
-            border: 1px solid rgba(255, 255, 255, 0.18);
-            border-radius: 12px;
-            padding: 10px 14px;
-            box-shadow: 0 16px 44px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.06);
-            backdrop-filter: blur(24px);
-        }
-
-        .win11-card-title {
-            font-size: 13px;
-            font-weight: 600;
-            color: #e4e4e7;
-        }
-
-        .win11-copy-btn {
-            background: #0078d4;
-            border: none;
-            border-radius: 6px;
-            padding: 6px 14px;
-            color: #ffffff;
-            font-size: 13px;
-            font-weight: 600;
-            transition: background-color 100ms ease;
-        }
-
-        .win11-copy-btn:hover {
-            background: #1084d8;
-        }
-
-        .win11-close-btn {
-            background: transparent;
-            border: none;
-            border-radius: 6px;
-            padding: 6px 8px;
-            color: #a1a1aa;
-        }
-
-        .win11-close-btn:hover {
-            background: rgba(255, 255, 255, 0.12);
-            color: #ffffff;
-        }
-
-        .win11-card-textview {
-            background: #18181b;
-            color: #ffffff;
-            border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 8px;
-            padding: 8px 10px;
-            font-size: 13px;
-            line-height: 1.4;
-        }
-
-        .win11-card-textview:focus {
-            border-color: #0078d4;
-        }
-
-        .win11-card-hint {
-            font-size: 11px;
-            color: #71717a;
-            margin-top: 2px;
-        }
-
-        /* Top Bar */
-        .win11-topbar {
-            background: rgba(30, 30, 34, 0.94);
+        .floating-pill {
+            background: rgba(22, 22, 24, 0.92);
             border: 1px solid rgba(255, 255, 255, 0.16);
             border-radius: 9999px;
-            padding: 4px 10px;
-            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.65);
+            padding: 6px 10px;
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
             backdrop-filter: blur(24px);
         }
 
-        .win11-topbar-btn {
+        .floating-pill button,
+        .floating-pill .pill-btn {
             background: transparent;
             border: none;
             border-radius: 9999px;
-            padding: 6px 12px;
+            min-width: 40px;
+            min-height: 40px;
+            padding: 6px 10px;
             color: #f2f2f7;
             font-size: 13px;
-            font-weight: 500;
-            transition: background-color 120ms ease;
+            font-weight: 600;
+            transition: background-color 150ms ease, transform 100ms ease;
         }
 
-        .win11-topbar-btn:hover {
+        .floating-pill button:hover,
+        .floating-pill .pill-btn:hover {
             background: rgba(255, 255, 255, 0.14);
-            color: #ffffff;
+        }
+
+        .floating-pill button:active,
+        .floating-pill .pill-btn:active {
+            background: rgba(255, 255, 255, 0.24);
+            transform: scale(0.96);
         }
 
         .lang-badge {
@@ -614,16 +490,21 @@ pub fn build_overlay_window(app: &adw::Application) {
             margin-left: 2px;
         }
 
-        .topbar-separator {
+        .pill-separator {
             background-color: rgba(255, 255, 255, 0.16);
-            margin: 4px 2px;
+            margin: 6px 4px;
             min-width: 1px;
+        }
+
+        .floating-pill button.destructive:hover {
+            background: rgba(239, 68, 68, 0.28);
+            color: #fca5a5;
         }
 
         .lang-popover contents {
             background: rgba(30, 30, 32, 0.96);
             border: 1px solid rgba(255, 255, 255, 0.12);
-            border-radius: 12px;
+            border-radius: 14px;
             box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
             padding: 4px;
         }
@@ -631,7 +512,7 @@ pub fn build_overlay_window(app: &adw::Application) {
         .popover-item {
             background: transparent;
             border: none;
-            border-radius: 6px;
+            border-radius: 8px;
             padding: 8px 14px;
             color: #f2f2f7;
             font-size: 13px;
@@ -651,12 +532,11 @@ pub fn build_overlay_window(app: &adw::Application) {
         gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
     );
 
-    // --- Key Controller: Escape = close, Ctrl+C / Enter = copy and exit ---
+    // --- Key Controller: Escape = close, Enter / Ctrl+C = copy and exit ---
     let key_controller = EventControllerKey::new();
     {
         let window_weak = window.downgrade();
-        let copy_fn = copy_and_finish.clone();
-        let card_box = card_box.clone();
+        let copy_fn = copy_selection_and_finish.clone();
 
         key_controller.connect_key_pressed(move |_, keyval, _, state| {
             if keyval == gdk::Key::Escape {
@@ -669,16 +549,13 @@ pub fn build_overlay_window(app: &adw::Application) {
             // Ctrl+C: copy selected text
             if state.contains(gdk::ModifierType::CONTROL_MASK)
                 && (keyval == gdk::Key::c || keyval == gdk::Key::C)
-                && card_box.is_visible()
             {
                 copy_fn();
                 return glib::Propagation::Stop;
             }
 
             // Enter: copy selected text
-            if (keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter)
-                && card_box.is_visible()
-            {
+            if keyval == gdk::Key::Return || keyval == gdk::Key::KP_Enter {
                 copy_fn();
                 return glib::Propagation::Stop;
             }
@@ -700,6 +577,16 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
         });
     }
+}
+
+fn create_symbolic_button(icon_name: &str, tooltip: &str) -> Button {
+    let btn = Button::new();
+    btn.add_css_class("pill-btn");
+    let icon = Image::from_icon_name(icon_name);
+    icon.set_pixel_size(18);
+    btn.set_child(Some(&icon));
+    btn.set_tooltip_text(Some(tooltip));
+    btn
 }
 
 fn image_to_cairo_surface(img: &DynamicImage) -> Result<cairo::ImageSurface> {
