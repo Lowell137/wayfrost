@@ -46,7 +46,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     let active_lang = Rc::new(RefCell::new("TR".to_string()));
     let cached_text: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
-    // Live Text: detected words with bounding boxes
+    // Live Text: detected words with bounding boxes (exact 1:1 screen coordinates)
     let all_words: Rc<RefCell<Vec<DetectedWord>>> = Rc::new(RefCell::new(Vec::new()));
     let selected_indices: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
 
@@ -79,6 +79,9 @@ pub fn build_overlay_window(app: &adw::Application) {
     drawing_area.set_hexpand(true);
     drawing_area.set_vexpand(true);
 
+    // Cache accent color ONCE at startup to avoid querying GSettings D-Bus on every frame
+    let (ar, ag, ab, _) = get_accent_color(&drawing_area);
+
     // Floating Copy Button (Circular pill, only edit-copy-symbolic)
     let floating_copy_btn = Button::new();
     floating_copy_btn.add_css_class("floating-copy-btn");
@@ -96,10 +99,8 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let locked_region = Rc::clone(&locked_region);
         let framing_drag = Rc::clone(&framing_drag);
-        let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
-        let da_for_style = drawing_area.clone();
 
         drawing_area.set_draw_func(move |_, cr, width, height| {
             let w = width as f64;
@@ -107,11 +108,8 @@ pub fn build_overlay_window(app: &adw::Application) {
 
             let f_drag = *framing_drag.borrow();
             let locked = *locked_region.borrow();
-            let t_drag = *text_drag.borrow();
             let words = all_words.borrow();
             let selected = selected_indices.borrow();
-
-            let (ar, ag, ab, _) = get_accent_color(&da_for_style);
 
             // 1. Framing Drag or Persistent Locked Region Dimming
             if let Some((start, curr)) = f_drag {
@@ -179,25 +177,9 @@ pub fn build_overlay_window(app: &adw::Application) {
                 let _ = cr.fill();
             }
 
-            // 2. Text Drag Selection rectangle inside frame
-            if let Some((start, curr)) = t_drag {
-                let tx1 = start.0.min(curr.0);
-                let ty1 = start.1.min(curr.1);
-                let tw = (start.0 - curr.0).abs();
-                let th = (start.1 - curr.1).abs();
-
-                cr.set_source_rgba(ar, ag, ab, 0.12);
-                cr.rectangle(tx1, ty1, tw, th);
-                let _ = cr.fill();
-
-                cr.set_source_rgba(ar, ag, ab, 0.70);
-                cr.set_line_width(1.0);
-                cr.rectangle(tx1, ty1, tw, th);
-                let _ = cr.stroke();
-            }
-
-            // 3. Selected word boundaries:
-            // Background is 100% TRANSPARENT (NO background fill), only 1.0px @accent_color stroke
+            // 2. Selected word boundaries:
+            // Background is 100% TRANSPARENT (NO background fill), only 1.0px @accent_color stroke!
+            // Notice: When selecting text, NO outer selection rectangle is drawn. Only the words!
             for &idx in selected.iter() {
                 if let Some(word) = words.get(idx) {
                     cr.set_source_rgba(ar, ag, ab, 0.95);
@@ -210,38 +192,17 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
     root_overlay.add_overlay(&drawing_area);
 
-    // 2. Background task: extract word bounding boxes across full screen
+    // 2. Background task: extract word bounding boxes across full screen (in 1:1 pixel coords)
     let (tx, rx) = std::sync::mpsc::channel::<Vec<DetectedWord>>();
     let rx = Rc::new(RefCell::new(rx));
     {
         let all_words = Rc::clone(&all_words);
         let da = drawing_area.clone();
-        let screen_img = screen_img.clone();
         let rx = Rc::clone(&rx);
 
         glib::timeout_add_local(std::time::Duration::from_millis(25), move || {
             if let Ok(words) = rx.borrow_mut().try_recv() {
-                let da_w = da.width() as f64;
-                let da_h = da.height() as f64;
-                let (img_w, img_h) = if let Some(ref img) = screen_img {
-                    img.dimensions()
-                } else {
-                    (1920, 1080)
-                };
-                let scale_x = da_w / img_w.max(1) as f64;
-                let scale_y = da_h / img_h.max(1) as f64;
-
-                let mut scaled_words = words;
-                if (scale_x - 1.0).abs() > 0.001 || (scale_y - 1.0).abs() > 0.001 {
-                    for w in &mut scaled_words {
-                        w.x *= scale_x;
-                        w.y *= scale_y;
-                        w.w *= scale_x;
-                        w.h *= scale_y;
-                    }
-                }
-
-                *all_words.borrow_mut() = scaled_words;
+                *all_words.borrow_mut() = words;
                 da.queue_draw();
                 glib::ControlFlow::Break
             } else {
@@ -269,7 +230,6 @@ pub fn build_overlay_window(app: &adw::Application) {
         let locked_region = Rc::clone(&locked_region);
         let screen_img = screen_img.clone();
         let active_lang = Rc::clone(&active_lang);
-        let drawing_area = drawing_area.clone();
         let window_weak = window.downgrade();
 
         move || {
@@ -290,15 +250,10 @@ pub fn build_overlay_window(app: &adw::Application) {
                         text = pipeline::join_words(&region_words);
                     } else if let Some(ref img) = screen_img {
                         let (img_w, img_h) = img.dimensions();
-                        let da_w = drawing_area.width() as f64;
-                        let da_h = drawing_area.height() as f64;
-                        let scale_x = img_w as f64 / da_w.max(1.0);
-                        let scale_y = img_h as f64 / da_h.max(1.0);
-
-                        let crop_x = ((rx * scale_x).round() as u32).min(img_w.saturating_sub(1));
-                        let crop_y = ((ry * scale_y).round() as u32).min(img_h.saturating_sub(1));
-                        let crop_w = ((rw * scale_x).round() as u32).min(img_w - crop_x).max(1);
-                        let crop_h = ((rh * scale_y).round() as u32).min(img_h - crop_y).max(1);
+                        let crop_x = (rx.round() as u32).min(img_w.saturating_sub(1));
+                        let crop_y = (ry.round() as u32).min(img_h.saturating_sub(1));
+                        let crop_w = (rw.round() as u32).min(img_w - crop_x).max(1);
+                        let crop_h = (rh.round() as u32).min(img_h - crop_y).max(1);
 
                         let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
                         let lang = active_lang.borrow().clone();
@@ -332,7 +287,7 @@ pub fn build_overlay_window(app: &adw::Application) {
         }
     };
 
-    // --- Helper function: Schedule floating tooltip at mouse release offset ---
+    // --- Helper function: Schedule floating tooltip at mouse release offset in 0.20s (200ms) ---
     let schedule_copy_tooltip = {
         let copy_timer = Rc::clone(&copy_timer);
         let floating_copy_btn = floating_copy_btn.clone();
@@ -359,7 +314,8 @@ pub fn build_overlay_window(app: &adw::Application) {
             .max(12.0)
             .min(da_h - btn_size - 12.0);
 
-            let source_id = glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+            // 0.20s (200ms) response time as requested
+            let source_id = glib::timeout_add_local_once(std::time::Duration::from_millis(200), move || {
                 copy_timer_clone.borrow_mut().take();
                 btn_clone.set_margin_start(btn_x as i32);
                 btn_clone.set_margin_top(btn_y as i32);
@@ -446,8 +402,12 @@ pub fn build_overlay_window(app: &adw::Application) {
                     }
                 }
                 drop(words);
-                *selected_indices.borrow_mut() = new_sel;
-                da.queue_draw();
+
+                // Only queue redraw when selection changes to prevent frame drops
+                if *selected_indices.borrow() != new_sel {
+                    *selected_indices.borrow_mut() = new_sel;
+                    da.queue_draw();
+                }
             } else {
                 let f_start_opt = framing_drag.borrow().map(|(start, _)| start);
                 if let Some(start) = f_start_opt {
@@ -483,45 +443,30 @@ pub fn build_overlay_window(app: &adw::Application) {
                     // PERSISTENT SELECTION RECTANGLE!
                     *locked_region.borrow_mut() = Some((sx, sy, sw, sh));
 
-                    // Ensure words within this region are recognized
-                    let has_words_in_region = {
-                        let words = all_words.borrow();
-                        words
-                            .iter()
-                            .any(|w| !(w.x + w.w < sx || w.x > sx + sw || w.y + w.h < sy || w.y > sy + sh))
-                    };
-
-                    if !has_words_in_region {
+                    // Only run crop OCR if background OCR hasn't provided any words yet
+                    if all_words.borrow().is_empty() {
                         if let Some(ref img) = screen_img {
                             let (img_w, img_h) = img.dimensions();
-                            let da_w = da.width() as f64;
-                            let da_h = da.height() as f64;
-                            let scale_x = img_w as f64 / da_w.max(1.0);
-                            let scale_y = img_h as f64 / da_h.max(1.0);
-
-                            let crop_x = ((sx * scale_x).round() as u32).min(img_w.saturating_sub(1));
-                            let crop_y = ((sy * scale_y).round() as u32).min(img_h.saturating_sub(1));
-                            let crop_w = ((sw * scale_x).round() as u32).min(img_w - crop_x).max(1);
-                            let crop_h = ((sh * scale_y).round() as u32).min(img_h - crop_y).max(1);
+                            let crop_x = (sx.round() as u32).min(img_w.saturating_sub(1));
+                            let crop_y = (sy.round() as u32).min(img_h.saturating_sub(1));
+                            let crop_w = (sw.round() as u32).min(img_w - crop_x).max(1);
+                            let crop_h = (sh.round() as u32).min(img_h - crop_y).max(1);
 
                             let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
                             let lang = active_lang.borrow().clone();
                             let crop_dyn = DynamicImage::ImageRgba8(crop);
 
                             if let Ok(mut crop_words) = pipeline::run_tesseract_tsv(&crop_dyn, &lang) {
-                                let mut words = all_words.borrow_mut();
-                                for mut w in crop_words.drain(..) {
-                                    w.x = (w.x + crop_x as f64) / scale_x;
-                                    w.y = (w.y + crop_y as f64) / scale_y;
-                                    w.w = w.w / scale_x;
-                                    w.h = w.h / scale_y;
-                                    words.push(w);
+                                for w in &mut crop_words {
+                                    w.x += crop_x as f64;
+                                    w.y += crop_y as f64;
                                 }
+                                *all_words.borrow_mut() = crop_words;
                             }
                         }
                     }
 
-                    // Schedule 400ms floating copy tooltip directly at mouse release coordinates!
+                    // Schedule floating copy tooltip directly at mouse release coordinates in 0.20s!
                     schedule_tooltip(current.0, current.1);
                 } else {
                     // Click outside without drag -> clear persistent region
@@ -565,7 +510,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                     }
                 }
 
-                // Schedule 400ms floating copy tooltip directly at mouse release coordinates!
+                // Schedule floating copy tooltip directly at mouse release coordinates in 0.20s!
                 schedule_tooltip(current.0, current.1);
                 da.queue_draw();
             }
@@ -573,12 +518,14 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
     drawing_area.add_controller(gesture_drag);
 
-    // --- Cursor Motion: "crosshair" in free space / framing, "text" over detected word bounding boxes ---
+    // --- Fast Cursor Motion: Only call Wayland IPC set_cursor_from_name when state actually changes! ---
+    let current_cursor: Rc<RefCell<&'static str>> = Rc::new(RefCell::new("crosshair"));
     let motion = EventControllerMotion::new();
     {
         let all_words = Rc::clone(&all_words);
         let text_drag = Rc::clone(&text_drag);
         let locked_region = Rc::clone(&locked_region);
+        let current_cursor = Rc::clone(&current_cursor);
         let window_weak = window.downgrade();
         motion.connect_motion(move |_, x, y| {
             if let Some(win) = window_weak.upgrade() {
@@ -595,17 +542,21 @@ pub fn build_overlay_window(app: &adw::Application) {
                     })
                 };
                 let is_text_dragging = text_drag.borrow().is_some();
-                if is_over_word || is_text_dragging {
-                    win.set_cursor_from_name(Some("text"));
+                let desired_cursor = if is_over_word || is_text_dragging {
+                    "text"
                 } else {
-                    win.set_cursor_from_name(Some("crosshair"));
+                    "crosshair"
+                };
+                if *current_cursor.borrow() != desired_cursor {
+                    *current_cursor.borrow_mut() = desired_cursor;
+                    win.set_cursor_from_name(Some(desired_cursor));
                 }
             }
         });
     }
     drawing_area.add_controller(motion);
 
-    // --- Bottom Floating Pill Toolbar: PURE SYMBOLIC ICONS (No text labels), 24px icon sizes ---
+    // --- Bottom Floating Pill Toolbar: PURE SYMBOLIC ICONS (No text labels), 24px/28px icon sizes ---
     let action_bar = Box::new(Orientation::Horizontal, 8);
     action_bar.add_css_class("floating-pill");
     action_bar.set_halign(Align::Center);
@@ -818,7 +769,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     root_overlay.add_overlay(&bottom_box);
     window.set_child(Some(&root_overlay));
 
-    // --- CSS Styles ---
+    // --- CSS Styles: Optimized for zero rendering lag and crisp icons ---
     let css_provider = CssProvider::new();
     css_provider.load_from_data(
         "
@@ -827,12 +778,11 @@ pub fn build_overlay_window(app: &adw::Application) {
         }
 
         .floating-pill {
-            background: rgba(22, 22, 24, 0.92);
+            background: rgba(22, 22, 24, 0.95);
             border: 1px solid rgba(255, 255, 255, 0.16);
             border-radius: 9999px;
             padding: 6px 12px;
-            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.7);
-            backdrop-filter: blur(24px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
         }
 
         .floating-pill button,
@@ -844,7 +794,7 @@ pub fn build_overlay_window(app: &adw::Application) {
             min-height: 44px;
             padding: 8px;
             color: #f2f2f7;
-            transition: background-color 150ms ease, transform 100ms ease;
+            transition: background-color 120ms ease, transform 80ms ease;
         }
 
         .floating-pill button image,

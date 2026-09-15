@@ -346,8 +346,6 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
     }
 
     let tsv_str = String::from_utf8_lossy(&output.stdout);
-    let mut line_bounds: std::collections::HashMap<(usize, usize, usize), (f64, f64, f64, f64)> =
-        std::collections::HashMap::new();
     let mut words = Vec::new();
 
     for line in tsv_str.lines().skip(1) {
@@ -362,9 +360,7 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
             let width = parts[8].parse::<f64>().unwrap_or(0.0) / scale;
             let height = parts[9].parse::<f64>().unwrap_or(0.0) / scale;
 
-            if level == "4" {
-                line_bounds.insert((block_num, par_num, line_num), (left, top, width, height));
-            } else if level == "5" {
+            if level == "5" {
                 let text = parts[11].trim().to_string();
                 if !text.is_empty() {
                     words.push(DetectedWord {
@@ -379,14 +375,6 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
                     });
                 }
             }
-        }
-    }
-
-    // Harmonize vertical alignment per line to eliminate jumping and misaligned boxes
-    for w in &mut words {
-        if let Some(&(_, ly, _, lh)) = line_bounds.get(&(w.block_num, w.par_num, w.line_num)) {
-            w.y = ly;
-            w.h = lh.max(4.0);
         }
     }
 
