@@ -6,7 +6,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box, Button, CssProvider, DrawingArea, EventControllerKey, EventControllerMotion,
-    GestureDrag, Image, Label, Orientation, Overlay, Popover, Separator,
+    GestureDrag, Image, Label, Orientation, Overlay, Picture, Popover, Separator,
 };
 use image::{imageops, DynamicImage, GenericImageView};
 use libadwaita as adw;
@@ -36,12 +36,7 @@ pub fn build_overlay_window(app: &adw::Application) {
         .build();
 
     window.add_css_class("overlay-window");
-    window.set_cursor_from_name(Some("crosshair"));
-
-    // Convert screenshot to Cairo ImageSurface for exact 1:1 painting
-    let background_surface = screen_img.as_ref().and_then(|img| {
-        image_to_cairo_surface(img).ok().map(Rc::new)
-    });
+    window.set_cursor_from_name(Some("default"));
 
     let locked_region: Rc<RefCell<Option<(f64, f64, f64, f64)>>> = Rc::new(RefCell::new(None));
     let framing_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
@@ -55,41 +50,57 @@ pub fn build_overlay_window(app: &adw::Application) {
 
     let root_overlay = Overlay::new();
 
-    // Fullscreen DrawingArea: paints background image 1:1 + live word-level highlight
+    // 1. GPU-accelerated background picture (avoids 100% CPU Cairo redraw on every mouse frame!)
+    let bg_picture = Picture::new();
+    bg_picture.set_hexpand(true);
+    bg_picture.set_vexpand(true);
+    bg_picture.set_can_shrink(true);
+
+    if let Some(ref img) = screen_img {
+        let (w, h) = img.dimensions();
+        let rgba = img.to_rgba8();
+        let bytes = glib::Bytes::from_owned(rgba.into_raw());
+        let texture = gdk::MemoryTexture::new(
+            w as i32,
+            h as i32,
+            gdk::MemoryFormat::R8g8b8a8,
+            &bytes,
+            (w * 4) as usize,
+        );
+        bg_picture.set_paintable(Some(&texture));
+    }
+    root_overlay.set_child(Some(&bg_picture));
+
+    // Fullscreen transparent DrawingArea: overlays dimming, borders, and delicate word borders
     let drawing_area = DrawingArea::new();
     drawing_area.set_can_target(true);
     drawing_area.set_hexpand(true);
     drawing_area.set_vexpand(true);
 
+    let floating_copy_btn = Button::new();
+    floating_copy_btn.add_css_class("floating-copy-btn");
+    floating_copy_btn.set_cursor_from_name(Some("pointer"));
+    let copy_icon = Image::from_icon_name("edit-copy-symbolic");
+    copy_icon.set_pixel_size(18);
+    floating_copy_btn.set_child(Some(&copy_icon));
+    floating_copy_btn.set_tooltip_text(Some("Kopyala"));
+    floating_copy_btn.set_halign(Align::Start);
+    floating_copy_btn.set_valign(Align::Start);
+    floating_copy_btn.set_visible(false);
+
+    let copy_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
+
     {
-        let surface = background_surface.clone();
         let locked_region = Rc::clone(&locked_region);
         let framing_drag = Rc::clone(&framing_drag);
         let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
+        let da_for_style = drawing_area.clone();
 
         drawing_area.set_draw_func(move |_, cr, width, height| {
             let w = width as f64;
             let h = height as f64;
-
-            // 1. Paint original screenshot 1:1 with crystal clear quality
-            if let Some(ref surf) = surface {
-                let surf_w = surf.width() as f64;
-                let surf_h = surf.height() as f64;
-                let scale_x = w / surf_w.max(1.0);
-                let scale_y = h / surf_h.max(1.0);
-
-                let _ = cr.save();
-                cr.scale(scale_x, scale_y);
-                let _ = cr.set_source_surface(&**surf, 0.0, 0.0);
-                let _ = cr.paint();
-                let _ = cr.restore();
-            } else {
-                cr.set_source_rgb(0.08, 0.08, 0.1);
-                cr.rectangle(0.0, 0.0, w, h);
-                let _ = cr.fill();
-            }
 
             let f_drag = *framing_drag.borrow();
             let locked = *locked_region.borrow();
@@ -97,7 +108,9 @@ pub fn build_overlay_window(app: &adw::Application) {
             let words = all_words.borrow();
             let selected = selected_indices.borrow();
 
-            // 2. Dim background and draw region frame
+            let (ar, ag, ab, _) = get_accent_color(&da_for_style);
+
+            // 1. Dim background and draw region frame
             if let Some((start, curr)) = f_drag {
                 // User is actively dragging to frame a region
                 let sx = start.0.min(curr.0);
@@ -140,9 +153,9 @@ pub fn build_overlay_window(app: &adw::Application) {
                 cr.rectangle(rx + rw, ry, (w - (rx + rw)).max(0.0), rh);
                 let _ = cr.fill();
 
-                // Crisp vibrant blue frame border
-                cr.set_source_rgba(0.24, 0.58, 0.98, 0.90);
-                cr.set_line_width(2.0);
+                // Crisp frame border using Libadwaita accent color
+                cr.set_source_rgba(ar, ag, ab, 0.85);
+                cr.set_line_width(1.5);
                 cr.rectangle(rx, ry, rw, rh);
                 let _ = cr.stroke();
 
@@ -177,41 +190,36 @@ pub fn build_overlay_window(app: &adw::Application) {
                 let _ = cr.fill();
             }
 
-            // 3. Text drag selection box inside region
+            // 2. Text drag selection box inside region
             if let Some((start, curr)) = t_drag {
                 let tx1 = start.0.min(curr.0);
                 let ty1 = start.1.min(curr.1);
                 let tw = (start.0 - curr.0).abs();
                 let th = (start.1 - curr.1).abs();
 
-                cr.set_source_rgba(0.24, 0.58, 0.98, 0.15);
+                cr.set_source_rgba(ar, ag, ab, 0.12);
                 cr.rectangle(tx1, ty1, tw, th);
                 let _ = cr.fill();
 
-                cr.set_source_rgba(0.35, 0.65, 1.0, 0.60);
+                cr.set_source_rgba(ar, ag, ab, 0.60);
                 cr.set_line_width(1.0);
                 cr.rectangle(tx1, ty1, tw, th);
                 let _ = cr.stroke();
             }
 
-            // 4. Apple/Windows LIVE TEXT: highlight selected words directly on the image!
+            // 3. Apple/Windows LIVE TEXT: highlight selected words directly on the image!
+            // Transparent background (solid fill removed per design requirement), delicate accent border
             for &idx in selected.iter() {
                 if let Some(word) = words.get(idx) {
-                    // Translucent blue highlighter over the exact word on the original image
-                    cr.set_source_rgba(0.18, 0.52, 0.95, 0.42);
-                    cr.rectangle(word.x - 1.0, word.y - 1.0, word.w + 2.0, word.h + 2.0);
-                    let _ = cr.fill();
-
-                    // Crisp subtle border
-                    cr.set_source_rgba(0.35, 0.68, 1.0, 0.90);
+                    cr.set_source_rgba(ar, ag, ab, 0.95);
                     cr.set_line_width(1.0);
-                    cr.rectangle(word.x - 1.0, word.y - 1.0, word.w + 2.0, word.h + 2.0);
+                    cr.rectangle(word.x - 0.5, word.y - 0.5, word.w + 1.0, word.h + 1.0);
                     let _ = cr.stroke();
                 }
             }
         });
     }
-    root_overlay.set_child(Some(&drawing_area));
+    root_overlay.add_overlay(&drawing_area);
 
     // 2. Background task: extract word bounding boxes across full screen
     let (tx, rx) = std::sync::mpsc::channel::<Vec<DetectedWord>>();
@@ -318,9 +326,17 @@ pub fn build_overlay_window(app: &adw::Application) {
         let text_drag = Rc::clone(&text_drag);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
+        let copy_timer = Rc::clone(&copy_timer);
+        let floating_copy_btn = floating_copy_btn.clone();
         let da = drawing_area.clone();
 
         gesture_drag.connect_drag_begin(move |_, start_x, start_y| {
+            // Cancel pending floating button timer & hide immediately on new interaction
+            if let Some(source) = copy_timer.borrow_mut().take() {
+                source.remove();
+            }
+            floating_copy_btn.set_visible(false);
+
             let current_locked = *locked_region.borrow();
             let is_inside_locked = if let Some((rx, ry, rw, rh)) = current_locked {
                 start_x >= rx && start_x <= rx + rw && start_y >= ry && start_y <= ry + rh
@@ -402,6 +418,8 @@ pub fn build_overlay_window(app: &adw::Application) {
         let cached_text = Rc::clone(&cached_text);
         let screen_img = screen_img.clone();
         let active_lang = Rc::clone(&active_lang);
+        let copy_timer = Rc::clone(&copy_timer);
+        let floating_copy_btn = floating_copy_btn.clone();
         let da = drawing_area.clone();
 
         gesture_drag.connect_drag_end(move |_, offset_x, offset_y| {
@@ -464,12 +482,45 @@ pub fn build_overlay_window(app: &adw::Application) {
                     }
                 }
 
+                // Reset any existing timer & hide button until 400ms expires
+                if let Some(source) = copy_timer.borrow_mut().take() {
+                    source.remove();
+                }
+                floating_copy_btn.set_visible(false);
+
                 // Cache the joined string of the selected words
                 let words = all_words.borrow();
                 let selected = selected_indices.borrow();
                 let sel_words: Vec<&DetectedWord> = selected.iter().filter_map(|&i| words.get(i)).collect();
                 if !sel_words.is_empty() {
                     *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
+
+                    // 400ms Delayed Floating Copy Tooltip
+                    let min_x = sel_words.iter().map(|w| w.x).fold(f64::INFINITY, f64::min);
+                    let max_x = sel_words.iter().map(|w| w.x + w.w).fold(f64::NEG_INFINITY, f64::max);
+                    let min_y = sel_words.iter().map(|w| w.y).fold(f64::INFINITY, f64::min);
+                    let max_y = sel_words.iter().map(|w| w.y + w.h).fold(f64::NEG_INFINITY, f64::max);
+
+                    let btn_clone = floating_copy_btn.clone();
+                    let copy_timer_clone = Rc::clone(&copy_timer);
+                    let da_w = da.width() as f64;
+
+                    let source_id = glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+                        copy_timer_clone.borrow_mut().take();
+                        let center_x = (min_x + max_x) / 2.0;
+                        let btn_size = 38.0;
+                        let max_allowed_x = (da_w - btn_size - 12.0).max(12.0);
+                        let btn_x = ((center_x - btn_size / 2.0).max(12.0)).min(max_allowed_x);
+                        let btn_y = if min_y - btn_size - 8.0 < 12.0 {
+                            max_y + 8.0
+                        } else {
+                            min_y - btn_size - 8.0
+                        };
+                        btn_clone.set_margin_start(btn_x as i32);
+                        btn_clone.set_margin_top(btn_y as i32);
+                        btn_clone.set_visible(true);
+                    });
+                    *copy_timer.borrow_mut() = Some(source_id);
                 }
                 da.queue_draw();
             }
@@ -477,22 +528,32 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
     drawing_area.add_controller(gesture_drag);
 
-    // --- Cursor Motion: change to I-beam "text" cursor when inside locked region ---
+    // --- Cursor Motion: "text" (I-beam) cursor when over bounding boxes or dragging text, "default" otherwise ---
     let motion = EventControllerMotion::new();
     {
         let locked_region = Rc::clone(&locked_region);
+        let all_words = Rc::clone(&all_words);
+        let text_drag = Rc::clone(&text_drag);
         let window_weak = window.downgrade();
         motion.connect_motion(move |_, x, y| {
             if let Some(win) = window_weak.upgrade() {
-                let is_inside = if let Some((rx, ry, rw, rh)) = *locked_region.borrow() {
-                    x >= rx && x <= rx + rw && y >= ry && y <= ry + rh
-                } else {
-                    false
+                let is_over_word = {
+                    let words = all_words.borrow();
+                    let locked = *locked_region.borrow();
+                    words.iter().any(|w| {
+                        if let Some((rx, ry, rw, rh)) = locked {
+                            if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
+                                return false;
+                            }
+                        }
+                        x >= w.x - 2.0 && x <= w.x + w.w + 2.0 && y >= w.y - 2.0 && y <= w.y + w.h + 2.0
+                    })
                 };
-                if is_inside {
+                let is_text_dragging = text_drag.borrow().is_some();
+                if is_over_word || is_text_dragging {
                     win.set_cursor_from_name(Some("text"));
                 } else {
-                    win.set_cursor_from_name(Some("crosshair"));
+                    win.set_cursor_from_name(Some("default"));
                 }
             }
         });
@@ -551,8 +612,14 @@ pub fn build_overlay_window(app: &adw::Application) {
         let locked_region = Rc::clone(&locked_region);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
+        let copy_timer = Rc::clone(&copy_timer);
+        let floating_copy_btn = floating_copy_btn.clone();
 
         btn_reset_region.connect_clicked(move |_| {
+            if let Some(source) = copy_timer.borrow_mut().take() {
+                source.remove();
+            }
+            floating_copy_btn.set_visible(false);
             *locked_region.borrow_mut() = None;
             selected_indices.borrow_mut().clear();
             *cached_text.borrow_mut() = None;
@@ -560,7 +627,15 @@ pub fn build_overlay_window(app: &adw::Application) {
         });
     }
 
-    // 3. Language Switcher (Popover: TR / EN)
+    // 4. Floating Copy Button Click Handler
+    {
+        let copy_fn = copy_selection_and_finish.clone();
+        floating_copy_btn.connect_clicked(move |_| {
+            copy_fn();
+        });
+    }
+
+    // 5. Language Switcher (Popover: TR / EN)
     let lang_button = Button::new();
     lang_button.set_tooltip_text(Some("Dil Seçimi (Aktif: Türkçe - TR)"));
     lang_button.add_css_class("pill-btn");
@@ -664,6 +739,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     bottom_box.set_margin_bottom(28);
     bottom_box.append(&bar_clamp);
 
+    root_overlay.add_overlay(&floating_copy_btn);
     root_overlay.add_overlay(&bottom_box);
     window.set_child(Some(&root_overlay));
 
@@ -749,6 +825,31 @@ pub fn build_overlay_window(app: &adw::Application) {
         .popover-item:hover {
             background: rgba(255, 255, 255, 0.12);
         }
+
+        .floating-copy-btn {
+            background-color: @accent_bg_color;
+            background-image: none;
+            color: @accent_fg_color;
+            border-radius: 9999px;
+            min-width: 38px;
+            max-width: 38px;
+            min-height: 38px;
+            max-height: 38px;
+            padding: 0;
+            border: 1px solid rgba(255, 255, 255, 0.28);
+            box-shadow: 0 4px 18px rgba(0, 0, 0, 0.55);
+            transition: transform 120ms ease, background-color 150ms ease;
+            outline: none;
+        }
+
+        .floating-copy-btn:hover {
+            transform: scale(1.10);
+            box-shadow: 0 6px 24px rgba(0, 0, 0, 0.70);
+        }
+
+        .floating-copy-btn:active {
+            transform: scale(0.94);
+        }
         ",
     );
 
@@ -767,6 +868,8 @@ pub fn build_overlay_window(app: &adw::Application) {
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
         let all_words = Rc::clone(&all_words);
+        let copy_timer = Rc::clone(&copy_timer);
+        let floating_copy_btn = floating_copy_btn.clone();
         let da = drawing_area.clone();
 
         key_controller.connect_key_pressed(move |_, keyval, _, state| {
@@ -774,6 +877,10 @@ pub fn build_overlay_window(app: &adw::Application) {
                 let has_region = locked_region.borrow().is_some();
                 let has_sel = !selected_indices.borrow().is_empty();
                 if has_region || has_sel {
+                    if let Some(source) = copy_timer.borrow_mut().take() {
+                        source.remove();
+                    }
+                    floating_copy_btn.set_visible(false);
                     *locked_region.borrow_mut() = None;
                     selected_indices.borrow_mut().clear();
                     *cached_text.borrow_mut() = None;
@@ -844,6 +951,16 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
 }
 
+fn get_accent_color(widget: &DrawingArea) -> (f64, f64, f64, f64) {
+    let ctx = widget.style_context();
+    if let Some(rgba) = ctx.lookup_color("accent_color").or_else(|| ctx.lookup_color("accent_bg_color")) {
+        (rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64, rgba.alpha() as f64)
+    } else {
+        // Fallback default Libadwaita Blue: #3584e4
+        (0.208, 0.518, 0.894, 1.0)
+    }
+}
+
 fn create_symbolic_button(icon_name: &str, tooltip: &str) -> Button {
     let btn = Button::new();
     btn.add_css_class("pill-btn");
@@ -854,6 +971,7 @@ fn create_symbolic_button(icon_name: &str, tooltip: &str) -> Button {
     btn
 }
 
+#[allow(dead_code)]
 fn image_to_cairo_surface(img: &DynamicImage) -> Result<cairo::ImageSurface> {
     let (w, h) = img.dimensions();
     let rgba = img.to_rgba8();
