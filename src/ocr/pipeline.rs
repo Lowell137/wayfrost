@@ -313,11 +313,10 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
         processed = processed.resize_exact(new_w, new_h, imageops::FilterType::Triangle);
     }
 
-    let mut png_bytes = Vec::new();
-    processed.write_to(
-        &mut std::io::Cursor::new(&mut png_bytes),
-        image::ImageFormat::Png,
-    )?;
+    let (pw, ph) = processed.dimensions();
+    let rgb = processed.to_rgb8();
+    let mut ppm_bytes = format!("P6\n{} {}\n255\n", pw, ph).into_bytes();
+    ppm_bytes.extend_from_slice(&rgb.into_raw());
 
     let tesseract_lang = match lang {
         "EN" => "eng",
@@ -337,7 +336,7 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
         .context("Failed to spawn tesseract tsv")?;
 
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(&png_bytes);
+        let _ = stdin.write_all(&ppm_bytes);
     }
 
     let output = child.wait_with_output()?;
@@ -614,5 +613,34 @@ pub fn select_words_stream(
     }
 
     selected
+}
+
+/// Selects words swept by a drag gesture from start to current in reading order.
+pub fn select_in_drag(
+    start: (f64, f64),
+    current: (f64, f64),
+    words: &[DetectedWord],
+    candidates: &[usize],
+) -> Vec<usize> {
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    let min_x = start.0.min(current.0);
+    let max_x = start.0.max(current.0);
+    let min_y = start.1.min(current.1) - 4.0;
+    let max_y = start.1.max(current.1) + 4.0;
+
+    let in_rect: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let w = &words[i];
+            !(w.x + w.w < min_x || w.x > max_x || w.y + w.h < min_y || w.y > max_y)
+        })
+        .collect();
+
+    let lines = cluster_words_into_lines(words, &in_rect);
+    lines.into_iter().flatten().collect()
 }
 

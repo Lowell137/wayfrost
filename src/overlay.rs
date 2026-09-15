@@ -42,7 +42,6 @@ pub fn build_overlay_window(app: &adw::Application) {
     // State management: Persistent selection frame & text selection
     let locked_region: Rc<RefCell<Option<(f64, f64, f64, f64)>>> = Rc::new(RefCell::new(None));
     let framing_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
-    let text_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
     let active_lang = Rc::new(RefCell::new("TR".to_string()));
     let cached_text: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
@@ -112,26 +111,7 @@ pub fn build_overlay_window(app: &adw::Application) {
             let selected = { selected_indices.borrow().clone() };
 
             // 1. Framing Drag or Persistent Locked Region Dimming
-            if let Some((start, curr)) = f_drag {
-                let sx = start.0.min(curr.0);
-                let sy = start.1.min(curr.1);
-                let sw = (start.0 - curr.0).abs();
-                let sh = (start.1 - curr.1).abs();
-
-                // Dim unselected area
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
-                cr.rectangle(0.0, 0.0, w, sy);
-                cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
-                cr.rectangle(0.0, sy, sx, sh);
-                cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
-                let _ = cr.fill();
-
-                // Crisp accent frame border during active drag
-                cr.set_source_rgba(ar, ag, ab, 0.85);
-                cr.set_line_width(1.5);
-                cr.rectangle(sx, sy, sw, sh);
-                let _ = cr.stroke();
-            } else if let Some((rx, ry, rw, rh)) = locked {
+            if let Some((rx, ry, rw, rh)) = locked {
                 // PERSISTENT SELECTION RECTANGLE!
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.38);
                 cr.rectangle(0.0, 0.0, w, ry);
@@ -170,6 +150,29 @@ pub fn build_overlay_window(app: &adw::Application) {
                 cr.line_to(rx + rw, ry + rh);
                 cr.line_to(rx + rw, ry + rh - corner_len);
                 let _ = cr.stroke();
+            } else if let Some((start, curr)) = f_drag {
+                let sx = start.0.min(curr.0);
+                let sy = start.1.min(curr.1);
+                let sw = (start.0 - curr.0).abs();
+                let sh = (start.1 - curr.1).abs();
+
+                if selected.is_empty() && sw >= 4.0 && sh >= 4.0 {
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
+                    cr.rectangle(0.0, 0.0, w, sy);
+                    cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
+                    cr.rectangle(0.0, sy, sx, sh);
+                    cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
+                    let _ = cr.fill();
+
+                    cr.set_source_rgba(ar, ag, ab, 0.85);
+                    cr.set_line_width(1.5);
+                    cr.rectangle(sx, sy, sw, sh);
+                    let _ = cr.stroke();
+                } else {
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.22);
+                    cr.rectangle(0.0, 0.0, w, h);
+                    let _ = cr.fill();
+                }
             } else {
                 // Initial subtle scrim before region is selected
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.22);
@@ -331,12 +334,11 @@ pub fn build_overlay_window(app: &adw::Application) {
         }
     };
 
-    // --- Mouse Drag Gestures: Persistent Selection Rectangle + Text Selection ---
+    // --- Mouse Drag Gestures: Persistent Selection Rectangle + Direct Text Selection ---
     let gesture_drag = GestureDrag::new();
     {
         let locked_region = Rc::clone(&locked_region);
         let framing_drag = Rc::clone(&framing_drag);
-        let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
@@ -350,61 +352,39 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
             floating_copy_btn.set_visible(false);
 
+            // If user clicks outside active locked region, clear it
             let current_locked = { *locked_region.borrow() };
-            let is_inside_locked = if let Some((rx, ry, rw, rh)) = current_locked {
-                start_x >= rx - 8.0 && start_x <= rx + rw + 8.0
-                    && start_y >= ry - 8.0 && start_y <= ry + rh + 8.0
-            } else {
-                false
-            };
+            if let Some((rx, ry, rw, rh)) = current_locked {
+                let inside = start_x >= rx - 8.0 && start_x <= rx + rw + 8.0
+                    && start_y >= ry - 8.0 && start_y <= ry + rh + 8.0;
+                if !inside {
+                    *locked_region.borrow_mut() = None;
+                }
+            }
 
+            *framing_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
+
+            // If clicked directly on a word (with 6px padding), pre-select it
             let clicked_word_idx = {
+                let locked = *locked_region.borrow();
                 let words = all_words.borrow();
-                let mut found = None;
-                for (i, w) in words.iter().enumerate() {
-                    if let Some((rx, ry, rw, rh)) = current_locked {
+                words.iter().position(|w| {
+                    if let Some((rx, ry, rw, rh)) = locked {
                         if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
-                            continue;
+                            return false;
                         }
                     }
-                    if start_x >= w.x - 4.0 && start_x <= w.x + w.w + 4.0
-                        && start_y >= w.y - 4.0 && start_y <= w.y + w.h + 4.0
-                    {
-                        found = Some(i);
-                        break;
-                    }
-                }
-                found
+                    start_x >= w.x - 6.0 && start_x <= w.x + w.w + 6.0
+                        && start_y >= w.y - 6.0 && start_y <= w.y + w.h + 6.0
+                })
             };
-            let is_on_bounding_box = clicked_word_idx.is_some();
 
-            if current_locked.is_some() && is_inside_locked {
-                // Dragging/clicking INSIDE the persistent selection rectangle -> Text Selection
-                *text_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
-                *framing_drag.borrow_mut() = None;
-                if let Some(idx) = clicked_word_idx {
-                    *selected_indices.borrow_mut() = vec![idx];
-                } else {
-                    selected_indices.borrow_mut().clear();
-                }
-                *cached_text.borrow_mut() = None;
-            } else if current_locked.is_none() && is_on_bounding_box {
-                // Clicked directly on a word on screen without frame -> Select word
-                *text_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
-                *framing_drag.borrow_mut() = None;
-                if let Some(idx) = clicked_word_idx {
-                    *selected_indices.borrow_mut() = vec![idx];
-                } else {
-                    selected_indices.borrow_mut().clear();
-                }
-                *cached_text.borrow_mut() = None;
+            if let Some(idx) = clicked_word_idx {
+                *selected_indices.borrow_mut() = vec![idx];
             } else {
-                // Dragging in open empty space -> New Selection Rectangle framing
-                *text_drag.borrow_mut() = None;
-                *framing_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
                 selected_indices.borrow_mut().clear();
-                *cached_text.borrow_mut() = None;
             }
+            *cached_text.borrow_mut() = None;
             da.queue_draw();
         });
     }
@@ -412,16 +392,15 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let locked_region = Rc::clone(&locked_region);
         let framing_drag = Rc::clone(&framing_drag);
-        let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let da = drawing_area.clone();
 
         gesture_drag.connect_drag_update(move |_, offset_x, offset_y| {
-            let t_start_opt = { text_drag.borrow().map(|(start, _)| start) };
-            if let Some(start) = t_start_opt {
+            let start_opt = { framing_drag.borrow().map(|(start, _)| start) };
+            if let Some(start) = start_opt {
                 let current = (start.0 + offset_x, start.1 + offset_y);
-                *text_drag.borrow_mut() = Some((start, current));
+                *framing_drag.borrow_mut() = Some((start, current));
 
                 let locked = { *locked_region.borrow() };
                 let new_sel = {
@@ -437,22 +416,14 @@ pub fn build_overlay_window(app: &adw::Application) {
                         (0..words.len()).collect()
                     };
 
-                    let lines = pipeline::cluster_words_into_lines(&words, &candidates);
-                    pipeline::select_words_stream(start, current, &lines, &words)
+                    pipeline::select_in_drag(start, current, &words, &candidates)
                 };
 
                 let changed = { selected_indices.borrow().as_slice() != new_sel.as_slice() };
                 if changed {
                     *selected_indices.borrow_mut() = new_sel;
-                    da.queue_draw();
                 }
-            } else {
-                let f_start_opt = { framing_drag.borrow().map(|(start, _)| start) };
-                if let Some(start) = f_start_opt {
-                    let current = (start.0 + offset_x, start.1 + offset_y);
-                    *framing_drag.borrow_mut() = Some((start, current));
-                    da.queue_draw();
-                }
+                da.queue_draw();
             }
         });
     }
@@ -460,7 +431,6 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let locked_region = Rc::clone(&locked_region);
         let framing_drag = Rc::clone(&framing_drag);
-        let text_drag = Rc::clone(&text_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
@@ -468,67 +438,17 @@ pub fn build_overlay_window(app: &adw::Application) {
         let schedule_tooltip = schedule_copy_tooltip.clone();
 
         gesture_drag.connect_drag_end(move |_, offset_x, offset_y| {
-            let f_drag_opt = { framing_drag.borrow_mut().take() };
-            if let Some((start, _)) = f_drag_opt {
+            let drag_opt = { framing_drag.borrow_mut().take() };
+            if let Some((start, _)) = drag_opt {
                 let current = (start.0 + offset_x, start.1 + offset_y);
                 let sx = start.0.min(current.0);
                 let sy = start.1.min(current.1);
                 let sw = (start.0 - current.0).abs();
                 let sh = (start.1 - current.1).abs();
 
-                if sw >= 12.0 && sh >= 12.0 {
-                    // PERSISTENT SELECTION RECTANGLE!
-                    *locked_region.borrow_mut() = Some((sx, sy, sw, sh));
-                    selected_indices.borrow_mut().clear();
-                    *cached_text.borrow_mut() = None;
-                    schedule_tooltip(current.0, current.1);
-                } else {
-                    // Click in open space without dragging a box:
-                    let had_sel = { !selected_indices.borrow().is_empty() };
-                    if had_sel {
-                        selected_indices.borrow_mut().clear();
-                    } else {
-                        *locked_region.borrow_mut() = None;
-                    }
-                    *cached_text.borrow_mut() = None;
-                }
-                da.queue_draw();
-            } else {
-                let t_drag_opt = { text_drag.borrow_mut().take() };
-                if let Some((start, _)) = t_drag_opt {
-                    let current = (start.0 + offset_x, start.1 + offset_y);
-                    let sw = (start.0 - current.0).abs();
-                    let sh = (start.1 - current.1).abs();
-
-                    if sw < 4.0 && sh < 4.0 {
-                        // Single click: select single word under cursor, or clear if in empty margin
-                        let locked = { *locked_region.borrow() };
-                        let clicked = {
-                            let words = all_words.borrow();
-                            let mut found = None;
-                            for (i, w) in words.iter().enumerate() {
-                                if let Some((rx, ry, rw, rh)) = locked {
-                                    if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
-                                        continue;
-                                    }
-                                }
-                                if start.0 >= w.x - 4.0 && start.0 <= w.x + w.w + 4.0
-                                    && start.1 >= w.y - 4.0 && start.1 <= w.y + w.h + 4.0
-                                {
-                                    found = Some(i);
-                                    break;
-                                }
-                            }
-                            found
-                        };
-                        if let Some(idx) = clicked {
-                            *selected_indices.borrow_mut() = vec![idx];
-                        } else {
-                            selected_indices.borrow_mut().clear();
-                        }
-                    }
-
-                    // Cache selected text
+                let has_selected = { !selected_indices.borrow().is_empty() };
+                if has_selected {
+                    // Direct text selection: cache joined text & trigger copy tooltip
                     let text_opt = {
                         let words = all_words.borrow();
                         let selected = selected_indices.borrow();
@@ -541,10 +461,19 @@ pub fn build_overlay_window(app: &adw::Application) {
                         }
                     };
                     *cached_text.borrow_mut() = text_opt;
-
                     schedule_tooltip(current.0, current.1);
-                    da.queue_draw();
+                } else if sw >= 12.0 && sh >= 12.0 {
+                    // Empty area framing drag: lock selection rectangle
+                    *locked_region.borrow_mut() = Some((sx, sy, sw, sh));
+                    *cached_text.borrow_mut() = None;
+                    schedule_tooltip(current.0, current.1);
+                } else {
+                    // Click in open space without drag: dismiss persistent frame
+                    *locked_region.borrow_mut() = None;
+                    selected_indices.borrow_mut().clear();
+                    *cached_text.borrow_mut() = None;
                 }
+                da.queue_draw();
             }
         });
     }
@@ -555,7 +484,8 @@ pub fn build_overlay_window(app: &adw::Application) {
     let motion = EventControllerMotion::new();
     {
         let all_words = Rc::clone(&all_words);
-        let text_drag = Rc::clone(&text_drag);
+        let framing_drag = Rc::clone(&framing_drag);
+        let selected_indices = Rc::clone(&selected_indices);
         let locked_region = Rc::clone(&locked_region);
         let current_cursor = Rc::clone(&current_cursor);
         let window_weak = window.downgrade();
@@ -575,11 +505,11 @@ pub fn build_overlay_window(app: &adw::Application) {
                                 return false;
                             }
                         }
-                        x >= w.x - 4.0 && x <= w.x + w.w + 4.0 && y >= w.y - 4.0 && y <= w.y + w.h + 4.0
+                        x >= w.x - 6.0 && x <= w.x + w.w + 6.0 && y >= w.y - 6.0 && y <= w.y + w.h + 6.0
                     })
                 };
-                let is_text_dragging = { text_drag.borrow().is_some() };
-                let desired_cursor = if is_inside_locked || is_over_word || is_text_dragging {
+                let is_active_sel = { !selected_indices.borrow().is_empty() || framing_drag.borrow().is_some() };
+                let desired_cursor = if is_inside_locked || is_over_word || is_active_sel {
                     "text"
                 } else {
                     "crosshair"

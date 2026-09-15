@@ -92,3 +92,24 @@ fn test_stream_text_selection_multi_line() {
         "Line0_Word1 Line0_Word2\nLine1_Word0 Line1_Word1 Line1_Word2\nLine2_Word0"
     );
 }
+
+#[test]
+fn test_select_in_drag_direct() {
+    use wayfrost::ocr::pipeline::{select_in_drag, DetectedWord};
+
+    let sample_words = vec![
+        DetectedWord { x: 50.0, y: 100.0, w: 40.0, h: 20.0, text: "Direct".into(), ..Default::default() },
+        DetectedWord { x: 100.0, y: 100.0, w: 40.0, h: 20.0, text: "Text".into(), ..Default::default() },
+        DetectedWord { x: 150.0, y: 100.0, w: 60.0, h: 20.0, text: "Selection".into(), ..Default::default() },
+    ];
+    let candidates = vec![0, 1, 2];
+
+    // Drag sweeping over "Direct" and "Text"
+    let sel = select_in_drag((45.0, 95.0), (142.0, 115.0), &sample_words, &candidates);
+    assert_eq!(sel, vec![0, 1]);
+
+    // Drag in empty space: returns empty
+    let empty_sel = select_in_drag((500.0, 500.0), (600.0, 600.0), &sample_words, &candidates);
+    assert!(empty_sel.is_empty());
+}
+
