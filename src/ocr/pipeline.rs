@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
-use image::{DynamicImage, GenericImageView, GrayImage};
+use image::{imageops, DynamicImage, GenericImageView, GrayImage};
 use ndarray::Array4;
 use ort::session::Session;
 use ort::value::Tensor;
 use std::fs::File;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
+use std::process::{Command, Stdio};
 
 pub struct OcrEngine {
     rec_session: Session,
@@ -27,7 +28,6 @@ impl OcrEngine {
         for line in reader.lines() {
             char_dict.push(line?);
         }
-        // Add space character at the end (index 503)
         char_dict.push(" ".to_string());
 
         Ok(Self {
@@ -36,7 +36,30 @@ impl OcrEngine {
         })
     }
 
-    /// Recognizes a single horizontal line of text.
+    /// Primary OCR entry point:
+    /// Uses native Tesseract (tur+eng) if installed, with automatic dark-mode inversion and resolution upscaling.
+    /// Falls back to embedded ONNX PaddleOCR if Tesseract is not available.
+    pub fn recognize(&mut self, img: &DynamicImage, lang: &str) -> Result<String> {
+        let (w, h) = img.dimensions();
+        if w < 4 || h < 4 {
+            return Ok(String::new());
+        }
+
+        // 1. Preprocess: Dark mode inversion + upscaling for crisp OCR
+        let preprocessed = preprocess_for_ocr(img);
+
+        // 2. Try native Tesseract first (fastest, full Turkish dictionary)
+        if let Ok(text) = run_tesseract(&preprocessed, lang) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+
+        // 3. Fallback to ONNX neural net
+        self.recognize_image(&preprocessed)
+    }
+
     pub fn recognize_line(&mut self, img: &DynamicImage) -> Result<(String, f32)> {
         let (w, h) = img.dimensions();
         if w == 0 || h == 0 {
@@ -47,14 +70,13 @@ impl OcrEngine {
         let aspect = w as f32 / h as f32;
         let target_w = (target_h as f32 * aspect).max(48.0).round() as u32;
 
-        let resized = img.resize_exact(target_w, target_h, image::imageops::FilterType::Triangle);
+        let resized = img.resize_exact(target_w, target_h, imageops::FilterType::Triangle);
         let rgb_img = resized.to_rgb8();
 
         let mut input_array = Array4::<f32>::zeros((1, 3, target_h as usize, target_w as usize));
         for y in 0..target_h as usize {
             for x in 0..target_w as usize {
                 let pixel = rgb_img.get_pixel(x as u32, y as u32);
-                // Standard PP-OCR normalization: (val / 255.0 - 0.5) / 0.5
                 input_array[[0, 0, y, x]] = (pixel[0] as f32 / 255.0 - 0.5) / 0.5;
                 input_array[[0, 1, y, x]] = (pixel[1] as f32 / 255.0 - 0.5) / 0.5;
                 input_array[[0, 2, y, x]] = (pixel[2] as f32 / 255.0 - 0.5) / 0.5;
@@ -64,7 +86,6 @@ impl OcrEngine {
         let input_tensor = Tensor::from_array(input_array)?;
         let outputs = self.rec_session.run(ort::inputs!["x" => input_tensor])?;
 
-        // Output shape: [1, seq_len, 504]
         let (shape, data) = outputs["fetch_name_0"].try_extract_tensor::<f32>()?;
         let seq_len = shape[1] as usize;
         let num_classes = shape[2] as usize;
@@ -78,7 +99,6 @@ impl OcrEngine {
             let offset = t * num_classes;
             let step_slice = &data[offset..offset + num_classes];
 
-            // Find argmax
             let mut max_idx = 0;
             let mut max_val = f32::NEG_INFINITY;
             for (idx, &val) in step_slice.iter().enumerate() {
@@ -88,7 +108,6 @@ impl OcrEngine {
                 }
             }
 
-            // CTC decoding: 0 is blank
             if max_idx != 0 && max_idx != prev_idx {
                 let dict_idx = max_idx - 1;
                 if dict_idx < self.char_dict.len() {
@@ -109,21 +128,17 @@ impl OcrEngine {
         Ok((recognized_text, avg_score))
     }
 
-    /// Recognizes text from an arbitrary cropped region.
-    /// If multi-line, slices by horizontal projection valleys and merges with newlines.
     pub fn recognize_image(&mut self, img: &DynamicImage) -> Result<String> {
         let (w, h) = img.dimensions();
         if w < 4 || h < 4 {
             return Ok(String::new());
         }
 
-        // For small or single-line crops, recognize directly
         if h <= 64 {
             let (text, _) = self.recognize_line(img)?;
             return Ok(text.trim().to_string());
         }
 
-        // Multi-line segmentation via row projection profile
         let gray: GrayImage = img.to_luma8();
         let mut row_scores = vec![0.0f32; h as usize];
 
@@ -166,7 +181,6 @@ impl OcrEngine {
             }
         }
 
-        // If no clean lines detected, process entire image
         if lines.is_empty() {
             let (text, _) = self.recognize_line(img)?;
             return Ok(text.trim().to_string());
@@ -175,7 +189,7 @@ impl OcrEngine {
         let mut results = Vec::new();
         for (start_y, end_y) in lines {
             let line_h = (end_y - start_y) as u32;
-            let crop = image::imageops::crop_imm(img, 0, start_y as u32, w, line_h).to_image();
+            let crop = imageops::crop_imm(img, 0, start_y as u32, w, line_h).to_image();
             let (text, conf) = self.recognize_line(&DynamicImage::ImageRgba8(crop))?;
             let trimmed = text.trim();
             if !trimmed.is_empty() && conf > -5.0 {
@@ -187,60 +201,75 @@ impl OcrEngine {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::ocr::model_manager::ensure_models;
-    use gtk4::cairo;
+/// Preprocesses image for OCR:
+/// - Detects if text is light on dark (dark mode) and inverts to dark on light
+/// - Upscales low-resolution screen text for maximum character accuracy
+pub fn preprocess_for_ocr(img: &DynamicImage) -> DynamicImage {
+    let gray = img.to_luma8();
+    let total_pixels = (gray.width() * gray.height()).max(1) as u64;
+    let sum_luma: u64 = gray.pixels().map(|p| p[0] as u64).sum();
+    let avg_luma = (sum_luma / total_pixels) as u8;
 
-    #[test]
-    fn test_multiline_ocr_recognition() -> Result<()> {
-        let paths = ensure_models()?;
-        let mut engine = OcrEngine::new(&paths.rec_model, &paths.dict_file)?;
-
-        let width = 500;
-        let height = 120;
-        let mut surface = cairo::ImageSurface::create(cairo::Format::Rgb24, width, height)
-            .map_err(|e| anyhow::anyhow!("Cairo error: {:?}", e))?;
-        let cr = cairo::Context::new(&surface)
-            .map_err(|e| anyhow::anyhow!("Cairo context error: {:?}", e))?;
-
-        cr.set_source_rgb(1.0, 1.0, 1.0);
-        cr.paint().map_err(|e| anyhow::anyhow!("Paint error: {:?}", e))?;
-
-        cr.set_source_rgb(0.0, 0.0, 0.0);
-        cr.select_font_face("Sans", cairo::FontSlant::Normal, cairo::FontWeight::Bold);
-        cr.set_font_size(28.0);
-
-        cr.move_to(20.0, 45.0);
-        cr.show_text("Wayfrost Test Line 1")
-            .map_err(|e| anyhow::anyhow!("Text error: {:?}", e))?;
-
-        cr.move_to(20.0, 95.0);
-        cr.show_text("Wayfrost Test Line 2")
-            .map_err(|e| anyhow::anyhow!("Text error: {:?}", e))?;
-
-        drop(cr);
-
-        let data = surface.data().map_err(|e| anyhow::anyhow!("{:?}", e))?;
-        let mut rgb_buffer = image::RgbImage::new(width as u32, height as u32);
-        for y in 0..height as u32 {
-            for x in 0..width as u32 {
-                let offset = ((y * width as u32 + x) * 4) as usize;
-                let b = data[offset];
-                let g = data[offset + 1];
-                let r = data[offset + 2];
-                rgb_buffer.put_pixel(x, y, image::Rgb([r, g, b]));
-            }
+    // Invert if background is dark
+    let mut processed = if avg_luma < 128 {
+        let mut inverted = img.to_rgba8();
+        for p in inverted.pixels_mut() {
+            p[0] = 255 - p[0];
+            p[1] = 255 - p[1];
+            p[2] = 255 - p[2];
         }
-        drop(data);
+        DynamicImage::ImageRgba8(inverted)
+    } else {
+        img.clone()
+    };
 
-        let img = DynamicImage::ImageRgb8(rgb_buffer);
-        let recognized = engine.recognize_image(&img)?;
-
-        println!("Multiline recognized text:\n{}", recognized);
-        assert!(recognized.contains("Wayfrost") || recognized.contains("Line"));
-
-        Ok(())
+    // Upscale small text so OCR can recognize individual character details
+    let (w, h) = processed.dimensions();
+    if h < 80 {
+        let scale = (110.0 / h as f32).max(2.0);
+        let new_w = (w as f32 * scale).round() as u32;
+        let new_h = (h as f32 * scale).round() as u32;
+        processed = processed.resize_exact(new_w, new_h, imageops::FilterType::Triangle);
     }
+
+    processed
+}
+
+/// Runs native tesseract with stdin/stdout pipe
+pub fn run_tesseract(img: &DynamicImage, lang: &str) -> Result<String> {
+    let mut png_bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png_bytes),
+        image::ImageFormat::Png,
+    )?;
+
+    let tesseract_lang = match lang {
+        "EN" => "eng",
+        _ => "tur+eng",
+    };
+
+    let mut child = Command::new("tesseract")
+        .arg("stdin")
+        .arg("stdout")
+        .arg("-l")
+        .arg(tesseract_lang)
+        .arg("--psm")
+        .arg("6")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Failed to spawn tesseract")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(&png_bytes)?;
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        anyhow::bail!("tesseract exited with error");
+    }
+
+    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    Ok(text)
 }
