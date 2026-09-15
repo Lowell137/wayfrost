@@ -12,11 +12,11 @@ use image::{imageops, DynamicImage, GenericImageView};
 use libadwaita as adw;
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::capture;
 use crate::clipboard;
-use crate::ocr::model_manager;
-use crate::ocr::pipeline::OcrEngine;
+use crate::ocr::pipeline::{self, DetectedWord};
 
 #[derive(Default, Clone, Copy, Debug)]
 pub struct SelectionState {
@@ -48,7 +48,7 @@ impl SelectionState {
 pub fn build_overlay_window(app: &adw::Application) {
     // 1. Capture screen at startup
     let screen_img = match capture::capture_screen() {
-        Ok(img) => Some(Rc::new(img)),
+        Ok(img) => Some(Arc::new(img)),
         Err(e) => {
             log::warn!("Could not capture screen at startup: {e}");
             None
@@ -70,14 +70,17 @@ pub fn build_overlay_window(app: &adw::Application) {
         image_to_cairo_surface(img).ok().map(Rc::new)
     });
 
-    let ocr_engine: Rc<RefCell<Option<OcrEngine>>> = Rc::new(RefCell::new(None));
     let selection = Rc::new(RefCell::new(SelectionState::default()));
     let active_lang = Rc::new(RefCell::new("TR".to_string()));
     let cached_text: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
+    // Live Text: detected words with bounding boxes
+    let all_words: Rc<RefCell<Vec<DetectedWord>>> = Rc::new(RefCell::new(Vec::new()));
+    let selected_indices: Rc<RefCell<Vec<usize>>> = Rc::new(RefCell::new(Vec::new()));
+
     let root_overlay = Overlay::new();
 
-    // Fullscreen DrawingArea: paints background image 1:1 + dim scrim + live text highlighter
+    // Fullscreen DrawingArea: paints background image 1:1 + live word-level highlight
     let drawing_area = DrawingArea::new();
     drawing_area.set_can_target(true);
     drawing_area.set_hexpand(true);
@@ -86,6 +89,8 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let selection = Rc::clone(&selection);
         let surface = background_surface.clone();
+        let all_words = Rc::clone(&all_words);
+        let selected_indices = Rc::clone(&selected_indices);
 
         drawing_area.set_draw_func(move |_, cr, width, height| {
             let w = width as f64;
@@ -110,109 +115,126 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
 
             let s = selection.borrow();
+            let words = all_words.borrow();
+            let selected = selected_indices.borrow();
+
+            // 2. Dim background outside drag area while user is dragging
             if let Some((sx, sy, sw, sh)) = s.normalized() {
-                // Dim unselected regions around the text
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.40);
+                if s.active {
+                    cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
+                    // Top
+                    cr.rectangle(0.0, 0.0, w, sy);
+                    let _ = cr.fill();
+                    // Bottom
+                    cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
+                    let _ = cr.fill();
+                    // Left
+                    cr.rectangle(0.0, sy, sx, sh);
+                    let _ = cr.fill();
+                    // Right
+                    cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
+                    let _ = cr.fill();
 
-                // Top
-                cr.rectangle(0.0, 0.0, w, sy);
-                let _ = cr.fill();
-                // Bottom
-                cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
-                let _ = cr.fill();
-                // Left
-                cr.rectangle(0.0, sy, sx, sh);
-                let _ = cr.fill();
-                // Right
-                cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
-                let _ = cr.fill();
-
-                // Live text highlighter: highlights the original screen text with a translucent blue tint
-                // (Zero duplicate text rendered on top — 100% original crystal clear text underneath!)
-                cr.set_source_rgba(0.18, 0.52, 0.92, 0.32);
-                cr.rectangle(sx, sy, sw, sh);
-                let _ = cr.fill();
-
-                // Accent border
-                cr.set_source_rgba(0.28, 0.62, 0.98, 0.95);
-                cr.set_line_width(1.5);
-                cr.rectangle(sx, sy, sw, sh);
-                let _ = cr.stroke();
-            } else {
+                    // Subtle white drag rectangle border
+                    cr.set_source_rgba(1.0, 1.0, 1.0, 0.75);
+                    cr.set_line_width(1.5);
+                    cr.rectangle(sx, sy, sw, sh);
+                    let _ = cr.stroke();
+                }
+            } else if selected.is_empty() {
                 // Subtle scrim before any selection
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.25);
+                cr.set_source_rgba(0.0, 0.0, 0.0, 0.20);
                 cr.rectangle(0.0, 0.0, w, h);
                 let _ = cr.fill();
+            }
+
+            // 3. Apple/Windows LIVE TEXT: highlight selected words directly on the image!
+            for &idx in selected.iter() {
+                if let Some(word) = words.get(idx) {
+                    // Translucent blue highlighter over the exact word on the original image
+                    cr.set_source_rgba(0.18, 0.52, 0.95, 0.40);
+                    cr.rectangle(word.x - 1.0, word.y - 1.0, word.w + 2.0, word.h + 2.0);
+                    let _ = cr.fill();
+
+                    // Crisp subtle border
+                    cr.set_source_rgba(0.28, 0.62, 0.98, 0.90);
+                    cr.set_line_width(1.0);
+                    cr.rectangle(word.x - 1.0, word.y - 1.0, word.w + 2.0, word.h + 2.0);
+                    let _ = cr.stroke();
+                }
             }
         });
     }
     root_overlay.set_child(Some(&drawing_area));
 
-    // --- Helper function: Execute OCR on selected coordinates ---
-    let execute_ocr = {
-        let screen_img = screen_img.clone();
-        let selection = Rc::clone(&selection);
-        let ocr_engine = Rc::clone(&ocr_engine);
-        let active_lang = Rc::clone(&active_lang);
+    // 2. Background task: extract word bounding boxes across full screen
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<DetectedWord>>();
+    let rx = Rc::new(RefCell::new(rx));
+    {
+        let all_words = Rc::clone(&all_words);
         let da = drawing_area.clone();
+        let screen_img = screen_img.clone();
+        let rx = Rc::clone(&rx);
 
-        move || -> Result<String> {
-            let Some(ref img) = screen_img else {
-                anyhow::bail!("No screen image captured");
-            };
+        glib::timeout_add_local(std::time::Duration::from_millis(25), move || {
+            if let Ok(words) = rx.borrow_mut().try_recv() {
+                let da_w = da.width() as f64;
+                let da_h = da.height() as f64;
+                let (img_w, img_h) = if let Some(ref img) = screen_img {
+                    img.dimensions()
+                } else {
+                    (1920, 1080)
+                };
+                let scale_x = da_w / img_w.max(1) as f64;
+                let scale_y = da_h / img_h.max(1) as f64;
 
-            if ocr_engine.borrow().is_none() {
-                let paths = model_manager::ensure_models()?;
-                let engine = OcrEngine::new(&paths.rec_model, &paths.dict_file)?;
-                *ocr_engine.borrow_mut() = Some(engine);
-            }
+                let mut scaled_words = words;
+                if (scale_x - 1.0).abs() > 0.001 || (scale_y - 1.0).abs() > 0.001 {
+                    for w in &mut scaled_words {
+                        w.x *= scale_x;
+                        w.y *= scale_y;
+                        w.w *= scale_x;
+                        w.h *= scale_y;
+                    }
+                }
 
-            let (img_w, img_h) = img.dimensions();
-            let da_w = da.width() as f64;
-            let da_h = da.height() as f64;
-
-            let (sel_x, sel_y, sel_w, sel_h) = if let Some(rect) = selection.borrow().normalized() {
-                rect
+                *all_words.borrow_mut() = scaled_words;
+                da.queue_draw();
+                glib::ControlFlow::Break
             } else {
-                (0.0, 0.0, da_w.max(1.0), da_h.max(1.0))
-            };
+                glib::ControlFlow::Continue
+            }
+        });
+    }
 
-            let scale_x = img_w as f64 / da_w.max(1.0);
-            let scale_y = img_h as f64 / da_h.max(1.0);
+    if let Some(ref img_arc) = screen_img {
+        let img = Arc::clone(img_arc);
+        let lang = active_lang.borrow().clone();
 
-            let crop_x = ((sel_x * scale_x).round() as u32).min(img_w.saturating_sub(1));
-            let crop_y = ((sel_y * scale_y).round() as u32).min(img_h.saturating_sub(1));
-            let crop_w = ((sel_w * scale_x).round() as u32).min(img_w - crop_x).max(1);
-            let crop_h = ((sel_h * scale_y).round() as u32).min(img_h - crop_y).max(1);
-
-            let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
-            let lang = active_lang.borrow().clone();
-
-            let mut engine_ref = ocr_engine.borrow_mut();
-            let engine = engine_ref.as_mut().unwrap();
-            let text = engine.recognize(&DynamicImage::ImageRgba8(crop), &lang)?;
-            Ok(text)
-        }
-    };
+        std::thread::spawn(move || {
+            if let Ok(words) = pipeline::run_tesseract_tsv(&img, &lang) {
+                let _ = tx.send(words);
+            }
+        });
+    }
 
     // --- Helper function: Copy highlighted text and finish ---
     let copy_selection_and_finish = {
         let cached_text = Rc::clone(&cached_text);
-        let execute_ocr = execute_ocr.clone();
+        let all_words = Rc::clone(&all_words);
+        let selected_indices = Rc::clone(&selected_indices);
         let window_weak = window.downgrade();
 
         move || {
-            let text_opt = cached_text.borrow().clone();
-            let text = match text_opt {
-                Some(t) => t,
-                None => match execute_ocr() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        log::error!("OCR error: {e}");
-                        String::new()
-                    }
-                },
-            };
+            let mut text = cached_text.borrow().clone().unwrap_or_default();
+            if text.trim().is_empty() {
+                let words = all_words.borrow();
+                let selected = selected_indices.borrow();
+                let sel_words: Vec<&DetectedWord> = selected.iter().filter_map(|&i| words.get(i)).collect();
+                if !sel_words.is_empty() {
+                    text = pipeline::join_words(&sel_words);
+                }
+            }
 
             let trimmed = text.trim();
             if !trimmed.is_empty() {
@@ -239,9 +261,11 @@ pub fn build_overlay_window(app: &adw::Application) {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
         let cached_text = Rc::clone(&cached_text);
+        let selected_indices = Rc::clone(&selected_indices);
 
         gesture_drag.connect_drag_begin(move |_, x, y| {
             *cached_text.borrow_mut() = None;
+            *selected_indices.borrow_mut() = Vec::new();
             let mut s = selection.borrow_mut();
             s.start_x = x;
             s.start_y = y;
@@ -256,12 +280,27 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
+        let all_words = Rc::clone(&all_words);
+        let selected_indices = Rc::clone(&selected_indices);
 
         gesture_drag.connect_drag_update(move |gesture, offset_x, offset_y| {
             let mut s = selection.borrow_mut();
             if let Some((start_x, start_y)) = gesture.start_point() {
                 s.current_x = start_x + offset_x;
                 s.current_y = start_y + offset_y;
+
+                if let Some((sx, sy, sw, sh)) = s.normalized() {
+                    let words = all_words.borrow();
+                    let mut new_sel = Vec::new();
+                    let (sx2, sy2) = (sx + sw, sy + sh);
+                    for (i, w) in words.iter().enumerate() {
+                        let (wx2, wy2) = (w.x + w.w, w.y + w.h);
+                        if !(wx2 < sx || w.x > sx2 || wy2 < sy || w.y > sy2) {
+                            new_sel.push(i);
+                        }
+                    }
+                    *selected_indices.borrow_mut() = new_sel;
+                }
                 da.queue_draw();
             }
         });
@@ -270,11 +309,14 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
-        let execute_ocr = execute_ocr.clone();
+        let all_words = Rc::clone(&all_words);
+        let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
+        let screen_img = screen_img.clone();
+        let active_lang = Rc::clone(&active_lang);
 
         gesture_drag.connect_drag_end(move |gesture, offset_x, offset_y| {
-            let has_selection = {
+            let rect = {
                 let mut s = selection.borrow_mut();
                 if let Some((start_x, start_y)) = gesture.start_point() {
                     s.current_x = start_x + offset_x;
@@ -283,13 +325,52 @@ pub fn build_overlay_window(app: &adw::Application) {
                     s.completed = true;
                     da.queue_draw();
                 }
-                s.normalized().is_some()
-            }; // <-- mutable borrow dropped here
+                s.normalized()
+            };
 
-            if has_selection {
-                // Background OCR: caches text so clicking Copy or pressing Enter/Ctrl+C is instant!
-                if let Ok(text) = execute_ocr() {
-                    *cached_text.borrow_mut() = Some(text);
+            if let Some((sx, sy, sw, sh)) = rect {
+                let words_empty = all_words.borrow().is_empty();
+
+                // If full screen words are not ready yet, run quick crop TSV in 30ms!
+                if words_empty {
+                    if let Some(ref img) = screen_img {
+                        let (img_w, img_h) = img.dimensions();
+                        let da_w = da.width() as f64;
+                        let da_h = da.height() as f64;
+                        let scale_x = img_w as f64 / da_w.max(1.0);
+                        let scale_y = img_h as f64 / da_h.max(1.0);
+
+                        let crop_x = ((sx * scale_x).round() as u32).min(img_w.saturating_sub(1));
+                        let crop_y = ((sy * scale_y).round() as u32).min(img_h.saturating_sub(1));
+                        let crop_w = ((sw * scale_x).round() as u32).min(img_w - crop_x).max(1);
+                        let crop_h = ((sh * scale_y).round() as u32).min(img_h - crop_y).max(1);
+
+                        let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
+                        let lang = active_lang.borrow().clone();
+
+                        if let Ok(mut crop_words) = pipeline::run_tesseract_tsv(&DynamicImage::ImageRgba8(crop), &lang) {
+                            for w in &mut crop_words {
+                                w.x = (w.x + crop_x as f64) / scale_x;
+                                w.y = (w.y + crop_y as f64) / scale_y;
+                                w.w = w.w / scale_x;
+                                w.h = w.h / scale_y;
+                            }
+                            let mut words = all_words.borrow_mut();
+                            let start_idx = words.len();
+                            let count = crop_words.len();
+                            words.extend(crop_words);
+                            *selected_indices.borrow_mut() = (start_idx..start_idx + count).collect();
+                            da.queue_draw();
+                        }
+                    }
+                }
+
+                // Cache the joined string of the selected words
+                let words = all_words.borrow();
+                let selected = selected_indices.borrow();
+                let sel_words: Vec<&DetectedWord> = selected.iter().filter_map(|&i| words.get(i)).collect();
+                if !sel_words.is_empty() {
+                    *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
                 }
             }
         });
@@ -313,27 +394,21 @@ pub fn build_overlay_window(app: &adw::Application) {
     // 2. Select All Button
     let btn_select_all = create_symbolic_button("edit-select-all-symbolic", "Tüm Ekranı Seç");
     {
-        let selection = Rc::clone(&selection);
         let da = drawing_area.clone();
-        let execute_ocr = execute_ocr.clone();
+        let all_words = Rc::clone(&all_words);
+        let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
 
         btn_select_all.connect_clicked(move |_| {
-            let (w, h) = (da.width() as f64, da.height() as f64);
-            {
-                let mut s = selection.borrow_mut();
-                s.start_x = 0.0;
-                s.start_y = 0.0;
-                s.current_x = w;
-                s.current_y = h;
-                s.active = false;
-                s.completed = true;
+            let words = all_words.borrow();
+            let all_idx: Vec<usize> = (0..words.len()).collect();
+            let sel_words: Vec<&DetectedWord> = words.iter().collect();
+            if !sel_words.is_empty() {
+                *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
             }
+            drop(words);
+            *selected_indices.borrow_mut() = all_idx;
             da.queue_draw();
-
-            if let Ok(text) = execute_ocr() {
-                *cached_text.borrow_mut() = Some(text);
-            }
         });
     }
 

@@ -273,3 +273,107 @@ pub fn run_tesseract(img: &DynamicImage, lang: &str) -> Result<String> {
     let text = String::from_utf8_lossy(&output.stdout).to_string();
     Ok(text)
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct DetectedWord {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+    pub text: String,
+    pub line_num: usize,
+    pub par_num: usize,
+    pub block_num: usize,
+}
+
+pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedWord>> {
+    let mut png_bytes = Vec::new();
+    img.write_to(
+        &mut std::io::Cursor::new(&mut png_bytes),
+        image::ImageFormat::Png,
+    )?;
+
+    let tesseract_lang = match lang {
+        "EN" => "eng",
+        _ => "tur+eng",
+    };
+
+    let mut child = Command::new("tesseract")
+        .arg("stdin")
+        .arg("stdout")
+        .arg("-l")
+        .arg(tesseract_lang)
+        .arg("tsv")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("Failed to spawn tesseract tsv")?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(&png_bytes);
+    }
+
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        anyhow::bail!("tesseract tsv exited with error");
+    }
+
+    let tsv_str = String::from_utf8_lossy(&output.stdout);
+    let mut words = Vec::new();
+
+    for line in tsv_str.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() >= 12 && parts[0] == "5" {
+            let text = parts[11].trim().to_string();
+            if !text.is_empty() {
+                let block_num = parts[2].parse::<usize>().unwrap_or(0);
+                let par_num = parts[3].parse::<usize>().unwrap_or(0);
+                let line_num = parts[4].parse::<usize>().unwrap_or(0);
+                let left = parts[6].parse::<f64>().unwrap_or(0.0);
+                let top = parts[7].parse::<f64>().unwrap_or(0.0);
+                let width = parts[8].parse::<f64>().unwrap_or(0.0);
+                let height = parts[9].parse::<f64>().unwrap_or(0.0);
+
+                words.push(DetectedWord {
+                    x: left,
+                    y: top,
+                    w: width,
+                    h: height,
+                    text,
+                    line_num,
+                    par_num,
+                    block_num,
+                });
+            }
+        }
+    }
+
+    Ok(words)
+}
+
+pub fn join_words(words: &[&DetectedWord]) -> String {
+    let mut result = String::new();
+    let mut last_block = None;
+    let mut last_par = None;
+    let mut last_line = None;
+
+    for w in words {
+        if let Some(lb) = last_block {
+            if w.block_num != lb || w.par_num != last_par.unwrap_or(0) {
+                result.push_str("\n\n");
+            } else if w.line_num != last_line.unwrap_or(0) {
+                result.push('\n');
+            } else {
+                result.push(' ');
+            }
+        }
+        result.push_str(&w.text);
+        last_block = Some(w.block_num);
+        last_par = Some(w.par_num);
+        last_line = Some(w.line_num);
+    }
+
+    result
+}
+
