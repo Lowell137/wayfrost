@@ -2,6 +2,7 @@ use anyhow::Result;
 use gtk4 as gtk;
 use gtk4::cairo;
 use gtk4::gdk;
+use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
@@ -38,9 +39,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     window.add_css_class("overlay-window");
     window.set_cursor_from_name(Some("default"));
 
-    let locked_region: Rc<RefCell<Option<(f64, f64, f64, f64)>>> = Rc::new(RefCell::new(None));
-    let framing_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
-    let text_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
+    let active_drag: Rc<RefCell<Option<((f64, f64), (f64, f64))>>> = Rc::new(RefCell::new(None));
     let active_lang = Rc::new(RefCell::new("TR".to_string()));
     let cached_text: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
 
@@ -91,9 +90,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     let copy_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
 
     {
-        let locked_region = Rc::clone(&locked_region);
-        let framing_drag = Rc::clone(&framing_drag);
-        let text_drag = Rc::clone(&text_drag);
+        let active_drag = Rc::clone(&active_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let da_for_style = drawing_area.clone();
@@ -102,113 +99,38 @@ pub fn build_overlay_window(app: &adw::Application) {
             let w = width as f64;
             let h = height as f64;
 
-            let f_drag = *framing_drag.borrow();
-            let locked = *locked_region.borrow();
-            let t_drag = *text_drag.borrow();
+            let drag = *active_drag.borrow();
             let words = all_words.borrow();
             let selected = selected_indices.borrow();
 
             let (ar, ag, ab, _) = get_accent_color(&da_for_style);
 
-            // 1. Dim background and draw region frame
-            if let Some((start, curr)) = f_drag {
-                // User is actively dragging to frame a region
+            // Subtle scrim across unselected areas
+            cr.set_source_rgba(0.0, 0.0, 0.0, 0.22);
+            cr.rectangle(0.0, 0.0, w, h);
+            let _ = cr.fill();
+
+            // 1. Active selection drag rectangle
+            if let Some((start, curr)) = drag {
                 let sx = start.0.min(curr.0);
                 let sy = start.1.min(curr.1);
                 let sw = (start.0 - curr.0).abs();
                 let sh = (start.1 - curr.1).abs();
 
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.40);
-                // Top
-                cr.rectangle(0.0, 0.0, w, sy);
-                let _ = cr.fill();
-                // Bottom
-                cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
-                let _ = cr.fill();
-                // Left
-                cr.rectangle(0.0, sy, sx, sh);
-                let _ = cr.fill();
-                // Right
-                cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
+                // Faint accent wash inside selection rectangle
+                cr.set_source_rgba(ar, ag, ab, 0.12);
+                cr.rectangle(sx, sy, sw, sh);
                 let _ = cr.fill();
 
-                // Subtle white drag rectangle border
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.85);
-                cr.set_line_width(1.5);
+                // Clean accent border around selection rectangle
+                cr.set_source_rgba(ar, ag, ab, 0.75);
+                cr.set_line_width(1.0);
                 cr.rectangle(sx, sy, sw, sh);
                 let _ = cr.stroke();
-            } else if let Some((rx, ry, rw, rh)) = locked {
-                // REGION IS LOCKED! IT PERSISTS ON SCREEN!
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.42);
-                // Top
-                cr.rectangle(0.0, 0.0, w, ry);
-                let _ = cr.fill();
-                // Bottom
-                cr.rectangle(0.0, ry + rh, w, (h - (ry + rh)).max(0.0));
-                let _ = cr.fill();
-                // Left
-                cr.rectangle(0.0, ry, rx, rh);
-                let _ = cr.fill();
-                // Right
-                cr.rectangle(rx + rw, ry, (w - (rx + rw)).max(0.0), rh);
-                let _ = cr.fill();
-
-                // Crisp frame border using Libadwaita accent color
-                cr.set_source_rgba(ar, ag, ab, 0.85);
-                cr.set_line_width(1.5);
-                cr.rectangle(rx, ry, rw, rh);
-                let _ = cr.stroke();
-
-                // Sleek corner accent marks
-                let corner_len = 14.0f64.min(rw / 4.0).min(rh / 4.0);
-                cr.set_source_rgba(1.0, 1.0, 1.0, 0.95);
-                cr.set_line_width(2.5);
-                // Top-Left
-                cr.move_to(rx, ry + corner_len);
-                cr.line_to(rx, ry);
-                cr.line_to(rx + corner_len, ry);
-                let _ = cr.stroke();
-                // Top-Right
-                cr.move_to(rx + rw - corner_len, ry);
-                cr.line_to(rx + rw, ry);
-                cr.line_to(rx + rw, ry + corner_len);
-                let _ = cr.stroke();
-                // Bottom-Left
-                cr.move_to(rx, ry + rh - corner_len);
-                cr.line_to(rx, ry + rh);
-                cr.line_to(rx + corner_len, ry + rh);
-                let _ = cr.stroke();
-                // Bottom-Right
-                cr.move_to(rx + rw - corner_len, ry + rh);
-                cr.line_to(rx + rw, ry + rh);
-                cr.line_to(rx + rw, ry + rh - corner_len);
-                let _ = cr.stroke();
-            } else {
-                // Initial subtle scrim before any region is selected
-                cr.set_source_rgba(0.0, 0.0, 0.0, 0.20);
-                cr.rectangle(0.0, 0.0, w, h);
-                let _ = cr.fill();
             }
 
-            // 2. Text drag selection box inside region
-            if let Some((start, curr)) = t_drag {
-                let tx1 = start.0.min(curr.0);
-                let ty1 = start.1.min(curr.1);
-                let tw = (start.0 - curr.0).abs();
-                let th = (start.1 - curr.1).abs();
-
-                cr.set_source_rgba(ar, ag, ab, 0.12);
-                cr.rectangle(tx1, ty1, tw, th);
-                let _ = cr.fill();
-
-                cr.set_source_rgba(ar, ag, ab, 0.60);
-                cr.set_line_width(1.0);
-                cr.rectangle(tx1, ty1, tw, th);
-                let _ = cr.stroke();
-            }
-
-            // 3. Apple/Windows LIVE TEXT: highlight selected words directly on the image!
-            // Transparent background (solid fill removed per design requirement), delicate accent border
+            // 2. LIVE TEXT: highlight selected words directly on original screen!
+            // 100% transparent background (NO solid blue fill!), delicate Libadwaita accent border
             for &idx in selected.iter() {
                 if let Some(word) = words.get(idx) {
                     cr.set_source_rgba(ar, ag, ab, 0.95);
@@ -277,7 +199,6 @@ pub fn build_overlay_window(app: &adw::Application) {
         let cached_text = Rc::clone(&cached_text);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
-        let locked_region = Rc::clone(&locked_region);
         let window_weak = window.downgrade();
 
         move || {
@@ -288,14 +209,8 @@ pub fn build_overlay_window(app: &adw::Application) {
                 let sel_words: Vec<&DetectedWord> = selected.iter().filter_map(|&i| words.get(i)).collect();
                 if !sel_words.is_empty() {
                     text = pipeline::join_words(&sel_words);
-                } else if let Some((rx, ry, rw, rh)) = *locked_region.borrow() {
-                    // Fallback: If user locked a region but didn't select individual words, copy all words in region!
-                    let region_words: Vec<&DetectedWord> = words.iter().filter(|w| {
-                        !(w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh)
-                    }).collect();
-                    if !region_words.is_empty() {
-                        text = pipeline::join_words(&region_words);
-                    }
+                } else if !words.is_empty() {
+                    text = pipeline::join_words(&words.iter().collect::<Vec<_>>());
                 }
             }
 
@@ -321,9 +236,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     // --- Mouse Drag Gestures: Select text live directly on the screen ---
     let gesture_drag = GestureDrag::new();
     {
-        let locked_region = Rc::clone(&locked_region);
-        let framing_drag = Rc::clone(&framing_drag);
-        let text_drag = Rc::clone(&text_drag);
+        let active_drag = Rc::clone(&active_drag);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
         let copy_timer = Rc::clone(&copy_timer);
@@ -337,62 +250,33 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
             floating_copy_btn.set_visible(false);
 
-            let current_locked = *locked_region.borrow();
-            let is_inside_locked = if let Some((rx, ry, rw, rh)) = current_locked {
-                start_x >= rx && start_x <= rx + rw && start_y >= ry && start_y <= ry + rh
-            } else {
-                false
-            };
-
-            if is_inside_locked {
-                // Clicked inside locked region -> Start Text Drag
-                *text_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
-                *framing_drag.borrow_mut() = None;
-                selected_indices.borrow_mut().clear();
-                *cached_text.borrow_mut() = None;
-            } else {
-                // Clicked outside -> Start new Region Framing Drag
-                *locked_region.borrow_mut() = None;
-                *text_drag.borrow_mut() = None;
-                *framing_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
-                selected_indices.borrow_mut().clear();
-                *cached_text.borrow_mut() = None;
-            }
+            *active_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
+            selected_indices.borrow_mut().clear();
+            *cached_text.borrow_mut() = None;
             da.queue_draw();
         });
     }
 
     {
-        let locked_region = Rc::clone(&locked_region);
-        let framing_drag = Rc::clone(&framing_drag);
-        let text_drag = Rc::clone(&text_drag);
+        let active_drag = Rc::clone(&active_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let da = drawing_area.clone();
 
         gesture_drag.connect_drag_update(move |_, offset_x, offset_y| {
-            let t_start = text_drag.borrow().map(|(start, _)| start);
-            let f_start = framing_drag.borrow().map(|(start, _)| start);
-
-            if let Some(start) = t_start {
+            let start_opt = active_drag.borrow().map(|(start, _)| start);
+            if let Some(start) = start_opt {
                 let current = (start.0 + offset_x, start.1 + offset_y);
-                *text_drag.borrow_mut() = Some((start, current));
+                *active_drag.borrow_mut() = Some((start, current));
 
                 let min_x = start.0.min(current.0);
                 let max_x = start.0.max(current.0);
-                let min_y = start.1.min(current.1) - 6.0;
-                let max_y = start.1.max(current.1) + 6.0;
+                let min_y = start.1.min(current.1) - 4.0;
+                let max_y = start.1.max(current.1) + 4.0;
 
                 let words = all_words.borrow();
-                let locked = *locked_region.borrow();
                 let mut new_sel = Vec::new();
-
                 for (i, w) in words.iter().enumerate() {
-                    if let Some((rx, ry, rw, rh)) = locked {
-                        if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
-                            continue;
-                        }
-                    }
                     let (wx2, wy2) = (w.x + w.w, w.y + w.h);
                     if !(wx2 < min_x || w.x > max_x || wy2 < min_y || w.y > max_y) {
                         new_sel.push(i);
@@ -401,18 +285,12 @@ pub fn build_overlay_window(app: &adw::Application) {
                 drop(words);
                 *selected_indices.borrow_mut() = new_sel;
                 da.queue_draw();
-            } else if let Some(start) = f_start {
-                let current = (start.0 + offset_x, start.1 + offset_y);
-                *framing_drag.borrow_mut() = Some((start, current));
-                da.queue_draw();
             }
         });
     }
 
     {
-        let locked_region = Rc::clone(&locked_region);
-        let framing_drag = Rc::clone(&framing_drag);
-        let text_drag = Rc::clone(&text_drag);
+        let active_drag = Rc::clone(&active_drag);
         let all_words = Rc::clone(&all_words);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
@@ -423,50 +301,16 @@ pub fn build_overlay_window(app: &adw::Application) {
         let da = drawing_area.clone();
 
         gesture_drag.connect_drag_end(move |_, offset_x, offset_y| {
-            if let Some((start, current)) = framing_drag.borrow_mut().take() {
+            let drag_opt = active_drag.borrow_mut().take();
+            if let Some((start, _)) = drag_opt {
+                let current = (start.0 + offset_x, start.1 + offset_y);
                 let sx = start.0.min(current.0);
                 let sy = start.1.min(current.1);
                 let sw = (start.0 - current.0).abs();
                 let sh = (start.1 - current.1).abs();
 
-                if sw >= 10.0 && sh >= 10.0 {
-                    *locked_region.borrow_mut() = Some((sx, sy, sw, sh));
-
-                    // If full screen words are not ready yet, run quick crop TSV in ~30ms!
-                    if all_words.borrow().is_empty() {
-                        if let Some(ref img) = screen_img {
-                            let (img_w, img_h) = img.dimensions();
-                            let da_w = da.width() as f64;
-                            let da_h = da.height() as f64;
-                            let scale_x = img_w as f64 / da_w.max(1.0);
-                            let scale_y = img_h as f64 / da_h.max(1.0);
-
-                            let crop_x = ((sx * scale_x).round() as u32).min(img_w.saturating_sub(1));
-                            let crop_y = ((sy * scale_y).round() as u32).min(img_h.saturating_sub(1));
-                            let crop_w = ((sw * scale_x).round() as u32).min(img_w - crop_x).max(1);
-                            let crop_h = ((sh * scale_y).round() as u32).min(img_h - crop_y).max(1);
-
-                            let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
-                            let lang = active_lang.borrow().clone();
-
-                            if let Ok(mut crop_words) = pipeline::run_tesseract_tsv(&DynamicImage::ImageRgba8(crop), &lang) {
-                                for w in &mut crop_words {
-                                    w.x = (w.x + crop_x as f64) / scale_x;
-                                    w.y = (w.y + crop_y as f64) / scale_y;
-                                    w.w = w.w / scale_x;
-                                    w.h = w.h / scale_y;
-                                }
-                                *all_words.borrow_mut() = crop_words;
-                            }
-                        }
-                    }
-                } else {
-                    *locked_region.borrow_mut() = None;
-                }
-                da.queue_draw();
-            } else if let Some((start, _)) = text_drag.borrow_mut().take() {
                 // If single click without drag (offset < 4px): select single word under cursor
-                if offset_x.abs() < 4.0 && offset_y.abs() < 4.0 {
+                if sw < 4.0 && sh < 4.0 {
                     let words = all_words.borrow();
                     let mut clicked_idx = None;
                     for (i, w) in words.iter().enumerate() {
@@ -480,6 +324,38 @@ pub fn build_overlay_window(app: &adw::Application) {
                     if let Some(idx) = clicked_idx {
                         *selected_indices.borrow_mut() = vec![idx];
                     }
+                } else if all_words.borrow().is_empty() && sw >= 8.0 && sh >= 8.0 {
+                    // If full-screen OCR is still processing, run fast crop TSV in ~30ms!
+                    if let Some(ref img) = screen_img {
+                        let (img_w, img_h) = img.dimensions();
+                        let da_w = da.width() as f64;
+                        let da_h = da.height() as f64;
+                        let scale_x = img_w as f64 / da_w.max(1.0);
+                        let scale_y = img_h as f64 / da_h.max(1.0);
+
+                        let crop_x = ((sx * scale_x).round() as u32).min(img_w.saturating_sub(1));
+                        let crop_y = ((sy * scale_y).round() as u32).min(img_h.saturating_sub(1));
+                        let crop_w = ((sw * scale_x).round() as u32).min(img_w - crop_x).max(1);
+                        let crop_h = ((sh * scale_y).round() as u32).min(img_h - crop_y).max(1);
+
+                        let crop = imageops::crop_imm(img.as_ref(), crop_x, crop_y, crop_w, crop_h).to_image();
+                        let lang = active_lang.borrow().clone();
+
+                        if let Ok(mut crop_words) = pipeline::run_tesseract_tsv(&DynamicImage::ImageRgba8(crop), &lang) {
+                            let mut all_w = Vec::new();
+                            let mut sel_idx = Vec::new();
+                            for (i, w) in crop_words.iter_mut().enumerate() {
+                                w.x = (w.x + crop_x as f64) / scale_x;
+                                w.y = (w.y + crop_y as f64) / scale_y;
+                                w.w = w.w / scale_x;
+                                w.h = w.h / scale_y;
+                                all_w.push(w.clone());
+                                sel_idx.push(i);
+                            }
+                            *all_words.borrow_mut() = all_w;
+                            *selected_indices.borrow_mut() = sel_idx;
+                        }
+                    }
                 }
 
                 // Reset any existing timer & hide button until 400ms expires
@@ -488,14 +364,13 @@ pub fn build_overlay_window(app: &adw::Application) {
                 }
                 floating_copy_btn.set_visible(false);
 
-                // Cache the joined string of the selected words
+                // Cache selected words and trigger 400ms delayed floating copy button
                 let words = all_words.borrow();
                 let selected = selected_indices.borrow();
                 let sel_words: Vec<&DetectedWord> = selected.iter().filter_map(|&i| words.get(i)).collect();
                 if !sel_words.is_empty() {
                     *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
 
-                    // 400ms Delayed Floating Copy Tooltip
                     let min_x = sel_words.iter().map(|w| w.x).fold(f64::INFINITY, f64::min);
                     let max_x = sel_words.iter().map(|w| w.x + w.w).fold(f64::NEG_INFINITY, f64::max);
                     let min_y = sel_words.iter().map(|w| w.y).fold(f64::INFINITY, f64::min);
@@ -531,26 +406,19 @@ pub fn build_overlay_window(app: &adw::Application) {
     // --- Cursor Motion: "text" (I-beam) cursor when over bounding boxes or dragging text, "default" otherwise ---
     let motion = EventControllerMotion::new();
     {
-        let locked_region = Rc::clone(&locked_region);
         let all_words = Rc::clone(&all_words);
-        let text_drag = Rc::clone(&text_drag);
+        let active_drag = Rc::clone(&active_drag);
         let window_weak = window.downgrade();
         motion.connect_motion(move |_, x, y| {
             if let Some(win) = window_weak.upgrade() {
                 let is_over_word = {
                     let words = all_words.borrow();
-                    let locked = *locked_region.borrow();
                     words.iter().any(|w| {
-                        if let Some((rx, ry, rw, rh)) = locked {
-                            if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
-                                return false;
-                            }
-                        }
                         x >= w.x - 2.0 && x <= w.x + w.w + 2.0 && y >= w.y - 2.0 && y <= w.y + w.h + 2.0
                     })
                 };
-                let is_text_dragging = text_drag.borrow().is_some();
-                if is_over_word || is_text_dragging {
+                let is_dragging = active_drag.borrow().is_some();
+                if is_over_word || is_dragging {
                     win.set_cursor_from_name(Some("text"));
                 } else {
                     win.set_cursor_from_name(Some("default"));
@@ -560,13 +428,22 @@ pub fn build_overlay_window(app: &adw::Application) {
     }
     drawing_area.add_controller(motion);
 
-    // --- Bottom Floating Pill Bar ---
-    let action_bar = Box::new(Orientation::Horizontal, 6);
+    // --- Bottom Floating Pill Toolbar ---
+    let action_bar = Box::new(Orientation::Horizontal, 8);
     action_bar.add_css_class("floating-pill");
     action_bar.set_halign(Align::Center);
 
-    // 1. Copy Highlighted Text button
-    let btn_copy_bar = create_symbolic_button("edit-copy-symbolic", "Seçilen Metni Kopyala (Ctrl+C / Enter)");
+    // 1. Copy Button
+    let btn_copy_bar = Button::new();
+    btn_copy_bar.add_css_class("pill-btn");
+    btn_copy_bar.set_tooltip_text(Some("Kopyala ve Çık (Enter)"));
+    let copy_bar_box = Box::new(Orientation::Horizontal, 6);
+    let copy_bar_icon = Image::from_icon_name("edit-copy-symbolic");
+    copy_bar_icon.set_pixel_size(16);
+    let copy_bar_label = Label::new(Some("Kopyala"));
+    copy_bar_box.append(&copy_bar_icon);
+    copy_bar_box.append(&copy_bar_label);
+    btn_copy_bar.set_child(Some(&copy_bar_box));
     {
         let copy_fn = copy_selection_and_finish.clone();
         btn_copy_bar.connect_clicked(move |_| {
@@ -579,25 +456,48 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let da = drawing_area.clone();
         let all_words = Rc::clone(&all_words);
-        let locked_region = Rc::clone(&locked_region);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
+        let copy_timer = Rc::clone(&copy_timer);
+        let floating_copy_btn = floating_copy_btn.clone();
 
         btn_select_all.connect_clicked(move |_| {
-            let words = all_words.borrow();
-            let locked = *locked_region.borrow();
-            let mut all_idx = Vec::new();
-            for (i, w) in words.iter().enumerate() {
-                if let Some((rx, ry, rw, rh)) = locked {
-                    if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
-                        continue;
-                    }
-                }
-                all_idx.push(i);
+            if let Some(source) = copy_timer.borrow_mut().take() {
+                source.remove();
             }
+            floating_copy_btn.set_visible(false);
+
+            let words = all_words.borrow();
+            let all_idx: Vec<usize> = (0..words.len()).collect();
             let sel_words: Vec<&DetectedWord> = all_idx.iter().filter_map(|&i| words.get(i)).collect();
             if !sel_words.is_empty() {
                 *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
+
+                let min_x = sel_words.iter().map(|w| w.x).fold(f64::INFINITY, f64::min);
+                let max_x = sel_words.iter().map(|w| w.x + w.w).fold(f64::NEG_INFINITY, f64::max);
+                let min_y = sel_words.iter().map(|w| w.y).fold(f64::INFINITY, f64::min);
+                let max_y = sel_words.iter().map(|w| w.y + w.h).fold(f64::NEG_INFINITY, f64::max);
+
+                let btn_clone = floating_copy_btn.clone();
+                let copy_timer_clone = Rc::clone(&copy_timer);
+                let da_w = da.width() as f64;
+
+                let source_id = glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+                    copy_timer_clone.borrow_mut().take();
+                    let center_x = (min_x + max_x) / 2.0;
+                    let btn_size = 38.0;
+                    let max_allowed_x = (da_w - btn_size - 12.0).max(12.0);
+                    let btn_x = ((center_x - btn_size / 2.0).max(12.0)).min(max_allowed_x);
+                    let btn_y = if min_y - btn_size - 8.0 < 12.0 {
+                        max_y + 8.0
+                    } else {
+                        min_y - btn_size - 8.0
+                    };
+                    btn_clone.set_margin_start(btn_x as i32);
+                    btn_clone.set_margin_top(btn_y as i32);
+                    btn_clone.set_visible(true);
+                });
+                *copy_timer.borrow_mut() = Some(source_id);
             }
             drop(words);
             *selected_indices.borrow_mut() = all_idx;
@@ -605,11 +505,10 @@ pub fn build_overlay_window(app: &adw::Application) {
         });
     }
 
-    // 3. Reset Region Button
-    let btn_reset_region = create_symbolic_button("view-refresh-symbolic", "Seçili Bölgeyi Sıfırla (Esc)");
+    // 3. Reset Selection Button
+    let btn_reset_region = create_symbolic_button("view-refresh-symbolic", "Seçimi Sıfırla (Esc)");
     {
         let da = drawing_area.clone();
-        let locked_region = Rc::clone(&locked_region);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
         let copy_timer = Rc::clone(&copy_timer);
@@ -620,7 +519,6 @@ pub fn build_overlay_window(app: &adw::Application) {
                 source.remove();
             }
             floating_copy_btn.set_visible(false);
-            *locked_region.borrow_mut() = None;
             selected_indices.borrow_mut().clear();
             *cached_text.borrow_mut() = None;
             da.queue_draw();
@@ -651,63 +549,87 @@ pub fn build_overlay_window(app: &adw::Application) {
 
     let popover = Popover::new();
     popover.add_css_class("lang-popover");
+    let pop_box = Box::new(Orientation::Vertical, 4);
+
+    let opt_tr = Button::with_label("Türkçe (TR)");
+    opt_tr.add_css_class("popover-item");
+    let opt_en = Button::with_label("English (EN)");
+    opt_en.add_css_class("popover-item");
+
+    pop_box.append(&opt_tr);
+    pop_box.append(&opt_en);
+    popover.set_child(Some(&pop_box));
     popover.set_parent(&lang_button);
 
-    let popover_clone = popover.clone();
-    lang_button.connect_clicked(move |_| {
-        popover_clone.popup();
+    lang_button.connect_clicked({
+        let pop = popover.clone();
+        move |_| pop.popup()
     });
 
-    let popover_vbox = Box::new(Orientation::Vertical, 4);
-    popover_vbox.set_margin_top(6);
-    popover_vbox.set_margin_bottom(6);
-    popover_vbox.set_margin_start(6);
-    popover_vbox.set_margin_end(6);
-
-    let btn_tr = Button::with_label("🇹🇷  Türkçe (TR)");
-    btn_tr.add_css_class("popover-item");
-    let btn_en = Button::with_label("🇬🇧  English (EN)");
-    btn_en.add_css_class("popover-item");
+    let (tx_lang, rx_lang) = std::sync::mpsc::channel::<Vec<DetectedWord>>();
+    let rx_lang = Rc::new(RefCell::new(rx_lang));
+    {
+        let all_words = Rc::clone(&all_words);
+        let da = drawing_area.clone();
+        let rx_lang = Rc::clone(&rx_lang);
+        glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
+            if let Ok(words) = rx_lang.borrow_mut().try_recv() {
+                *all_words.borrow_mut() = words;
+                da.queue_draw();
+            }
+            glib::ControlFlow::Continue
+        });
+    }
 
     {
-        let lang_label = lang_label.clone();
-        let lang_button = lang_button.clone();
         let active_lang = Rc::clone(&active_lang);
-        let cached_text = Rc::clone(&cached_text);
-        let popover = popover.clone();
-        btn_tr.connect_clicked(move |_| {
+        let label_clone = lang_label.clone();
+        let pop = popover.clone();
+        let screen_img = screen_img.clone();
+        let tx = tx_lang.clone();
+
+        opt_tr.connect_clicked(move |_| {
             *active_lang.borrow_mut() = "TR".to_string();
-            *cached_text.borrow_mut() = None;
-            lang_label.set_text("TR");
-            lang_button.set_tooltip_text(Some("Dil Seçimi (Aktif: Türkçe - TR)"));
-            popover.popdown();
+            label_clone.set_text("TR");
+            pop.popdown();
+
+            if let Some(ref img_arc) = screen_img {
+                let img = Arc::clone(img_arc);
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    if let Ok(words) = pipeline::run_tesseract_tsv(&img, "TR") {
+                        let _ = tx.send(words);
+                    }
+                });
+            }
         });
     }
 
     {
-        let lang_label = lang_label.clone();
-        let lang_button = lang_button.clone();
         let active_lang = Rc::clone(&active_lang);
-        let cached_text = Rc::clone(&cached_text);
-        let popover = popover.clone();
-        btn_en.connect_clicked(move |_| {
+        let label_clone = lang_label.clone();
+        let pop = popover.clone();
+        let screen_img = screen_img.clone();
+        let tx = tx_lang.clone();
+
+        opt_en.connect_clicked(move |_| {
             *active_lang.borrow_mut() = "EN".to_string();
-            *cached_text.borrow_mut() = None;
-            lang_label.set_text("EN");
-            lang_button.set_tooltip_text(Some("Dil Seçimi (Aktif: English - EN)"));
-            popover.popdown();
+            label_clone.set_text("EN");
+            pop.popdown();
+
+            if let Some(ref img_arc) = screen_img {
+                let img = Arc::clone(img_arc);
+                let tx = tx.clone();
+                std::thread::spawn(move || {
+                    if let Ok(words) = pipeline::run_tesseract_tsv(&img, "EN") {
+                        let _ = tx.send(words);
+                    }
+                });
+            }
         });
     }
 
-    popover_vbox.append(&btn_tr);
-    popover_vbox.append(&btn_en);
-    popover.set_child(Some(&popover_vbox));
-
-    // Separator before close
-    let separator = Separator::new(Orientation::Vertical);
-    separator.add_css_class("pill-separator");
-
-    // Close button
+    // 6. Close Button
     let btn_close = create_symbolic_button("window-close-symbolic", "Kapat (Esc)");
     btn_close.add_css_class("destructive");
     {
@@ -719,12 +641,17 @@ pub fn build_overlay_window(app: &adw::Application) {
         });
     }
 
-    // Pack into bottom pill bar
+    let sep1 = Separator::new(Orientation::Vertical);
+    sep1.add_css_class("pill-separator");
+    let sep2 = Separator::new(Orientation::Vertical);
+    sep2.add_css_class("pill-separator");
+
     action_bar.append(&btn_copy_bar);
+    action_bar.append(&sep1);
     action_bar.append(&btn_select_all);
     action_bar.append(&btn_reset_region);
     action_bar.append(&lang_button);
-    action_bar.append(&separator);
+    action_bar.append(&sep2);
     action_bar.append(&btn_close);
 
     let bar_clamp = adw::Clamp::builder()
@@ -819,7 +746,6 @@ pub fn build_overlay_window(app: &adw::Application) {
             color: #f2f2f7;
             font-size: 13px;
             font-weight: 500;
-            text-align: left;
         }
 
         .popover-item:hover {
@@ -864,7 +790,6 @@ pub fn build_overlay_window(app: &adw::Application) {
     {
         let window_weak = window.downgrade();
         let copy_fn = copy_selection_and_finish.clone();
-        let locked_region = Rc::clone(&locked_region);
         let selected_indices = Rc::clone(&selected_indices);
         let cached_text = Rc::clone(&cached_text);
         let all_words = Rc::clone(&all_words);
@@ -874,14 +799,12 @@ pub fn build_overlay_window(app: &adw::Application) {
 
         key_controller.connect_key_pressed(move |_, keyval, _, state| {
             if keyval == gdk::Key::Escape {
-                let has_region = locked_region.borrow().is_some();
                 let has_sel = !selected_indices.borrow().is_empty();
-                if has_region || has_sel {
+                if has_sel {
                     if let Some(source) = copy_timer.borrow_mut().take() {
                         source.remove();
                     }
                     floating_copy_btn.set_visible(false);
-                    *locked_region.borrow_mut() = None;
                     selected_indices.borrow_mut().clear();
                     *cached_text.borrow_mut() = None;
                     da.queue_draw();
@@ -893,24 +816,46 @@ pub fn build_overlay_window(app: &adw::Application) {
                 }
             }
 
-            // Ctrl+A: select all words in current region (or screen)
+            // Ctrl+A: select all words
             if state.contains(gdk::ModifierType::CONTROL_MASK)
                 && (keyval == gdk::Key::a || keyval == gdk::Key::A)
             {
-                let words = all_words.borrow();
-                let locked = *locked_region.borrow();
-                let mut all_sel = Vec::new();
-                for (i, w) in words.iter().enumerate() {
-                    if let Some((rx, ry, rw, rh)) = locked {
-                        if w.x + w.w < rx || w.x > rx + rw || w.y + w.h < ry || w.y > ry + rh {
-                            continue;
-                        }
-                    }
-                    all_sel.push(i);
+                if let Some(source) = copy_timer.borrow_mut().take() {
+                    source.remove();
                 }
+                floating_copy_btn.set_visible(false);
+
+                let words = all_words.borrow();
+                let all_sel: Vec<usize> = (0..words.len()).collect();
                 let sel_words: Vec<&DetectedWord> = all_sel.iter().filter_map(|&i| words.get(i)).collect();
                 if !sel_words.is_empty() {
                     *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
+
+                    let min_x = sel_words.iter().map(|w| w.x).fold(f64::INFINITY, f64::min);
+                    let max_x = sel_words.iter().map(|w| w.x + w.w).fold(f64::NEG_INFINITY, f64::max);
+                    let min_y = sel_words.iter().map(|w| w.y).fold(f64::INFINITY, f64::min);
+                    let max_y = sel_words.iter().map(|w| w.y + w.h).fold(f64::NEG_INFINITY, f64::max);
+
+                    let btn_clone = floating_copy_btn.clone();
+                    let copy_timer_clone = Rc::clone(&copy_timer);
+                    let da_w = da.width() as f64;
+
+                    let source_id = glib::timeout_add_local_once(std::time::Duration::from_millis(400), move || {
+                        copy_timer_clone.borrow_mut().take();
+                        let center_x = (min_x + max_x) / 2.0;
+                        let btn_size = 38.0;
+                        let max_allowed_x = (da_w - btn_size - 12.0).max(12.0);
+                        let btn_x = ((center_x - btn_size / 2.0).max(12.0)).min(max_allowed_x);
+                        let btn_y = if min_y - btn_size - 8.0 < 12.0 {
+                            max_y + 8.0
+                        } else {
+                            min_y - btn_size - 8.0
+                        };
+                        btn_clone.set_margin_start(btn_x as i32);
+                        btn_clone.set_margin_top(btn_y as i32);
+                        btn_clone.set_visible(true);
+                    });
+                    *copy_timer.borrow_mut() = Some(source_id);
                 }
                 drop(words);
                 *selected_indices.borrow_mut() = all_sel;
@@ -954,11 +899,29 @@ pub fn build_overlay_window(app: &adw::Application) {
 fn get_accent_color(widget: &DrawingArea) -> (f64, f64, f64, f64) {
     let ctx = widget.style_context();
     if let Some(rgba) = ctx.lookup_color("accent_color").or_else(|| ctx.lookup_color("accent_bg_color")) {
-        (rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64, rgba.alpha() as f64)
-    } else {
-        // Fallback default Libadwaita Blue: #3584e4
-        (0.208, 0.518, 0.894, 1.0)
+        return (rgba.red() as f64, rgba.green() as f64, rgba.blue() as f64, rgba.alpha() as f64);
     }
+
+    if let Some(source) = gio::SettingsSchemaSource::default() {
+        if source.lookup("org.gnome.desktop.interface", true).is_some() {
+            let settings = gio::Settings::new("org.gnome.desktop.interface");
+            let accent = settings.string("accent-color");
+            return match accent.as_str() {
+                "teal" => (0.13, 0.56, 0.64, 1.0),
+                "green" => (0.23, 0.58, 0.29, 1.0),
+                "yellow" => (0.78, 0.53, 0.0, 1.0),
+                "orange" => (0.93, 0.36, 0.0, 1.0),
+                "red" => (0.90, 0.18, 0.26, 1.0),
+                "pink" => (0.84, 0.38, 0.60, 1.0),
+                "purple" => (0.57, 0.25, 0.67, 1.0),
+                "slate" => (0.44, 0.51, 0.59, 1.0),
+                _ => (0.208, 0.518, 0.894, 1.0), // blue
+            };
+        }
+    }
+
+    // Fallback default Libadwaita Blue: #3584e4
+    (0.208, 0.518, 0.894, 1.0)
 }
 
 fn create_symbolic_button(icon_name: &str, tooltip: &str) -> Button {

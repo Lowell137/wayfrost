@@ -287,8 +287,34 @@ pub struct DetectedWord {
 }
 
 pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedWord>> {
+    let gray = img.to_luma8();
+    let total_pixels = (gray.width() * gray.height()).max(1) as u64;
+    let sum_luma: u64 = gray.pixels().map(|p| p[0] as u64).sum();
+    let avg_luma = (sum_luma / total_pixels) as u8;
+
+    let mut processed = if avg_luma < 128 {
+        let mut inverted = img.to_rgba8();
+        for p in inverted.pixels_mut() {
+            p[0] = 255 - p[0];
+            p[1] = 255 - p[1];
+            p[2] = 255 - p[2];
+        }
+        DynamicImage::ImageRgba8(inverted)
+    } else {
+        img.clone()
+    };
+
+    let (orig_w, orig_h) = processed.dimensions();
+    let mut scale = 1.0f64;
+    if orig_h < 80 && orig_h > 0 {
+        scale = (110.0 / orig_h as f64).max(2.0);
+        let new_w = (orig_w as f64 * scale).round() as u32;
+        let new_h = (orig_h as f64 * scale).round() as u32;
+        processed = processed.resize_exact(new_w, new_h, imageops::FilterType::Triangle);
+    }
+
     let mut png_bytes = Vec::new();
-    img.write_to(
+    processed.write_to(
         &mut std::io::Cursor::new(&mut png_bytes),
         image::ImageFormat::Png,
     )?;
@@ -330,10 +356,10 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
                 let block_num = parts[2].parse::<usize>().unwrap_or(0);
                 let par_num = parts[3].parse::<usize>().unwrap_or(0);
                 let line_num = parts[4].parse::<usize>().unwrap_or(0);
-                let left = parts[6].parse::<f64>().unwrap_or(0.0);
-                let top = parts[7].parse::<f64>().unwrap_or(0.0);
-                let width = parts[8].parse::<f64>().unwrap_or(0.0);
-                let height = parts[9].parse::<f64>().unwrap_or(0.0);
+                let left = parts[6].parse::<f64>().unwrap_or(0.0) / scale;
+                let top = parts[7].parse::<f64>().unwrap_or(0.0) / scale;
+                let width = parts[8].parse::<f64>().unwrap_or(0.0) / scale;
+                let height = parts[9].parse::<f64>().unwrap_or(0.0) / scale;
 
                 words.push(DetectedWord {
                     x: left,
