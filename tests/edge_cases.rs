@@ -44,16 +44,26 @@ fn test_turkish_char_set_in_dict() -> Result<()> {
 }
 
 #[test]
-fn test_screenshot_37() {
-    let img_res = image::open("/home/lowell/.gemini/antigravity/brain/a849d87f-9151-4ca4-8e04-5696711787b2/.user_uploaded/media_1789515472013.png");
+fn test_clean_52() {
+    let img_res = image::open("/tmp/clean_52.png");
     if let Ok(img) = img_res {
-        let crop = image::imageops::crop_imm(&img, 216, 185, 500, 410).to_image();
+        let crop = image::imageops::crop_imm(&img, 394, 258, 904, 383).to_image();
         let dyn_crop = image::DynamicImage::ImageRgba8(crop);
-
         let words = wayfrost::ocr::pipeline::run_tesseract_tsv(&dyn_crop, "TR").unwrap();
-        println!(">>> Crop words detected: {}", words.len());
-        let refs: Vec<&wayfrost::ocr::pipeline::DetectedWord> = words.iter().collect();
-        let text = wayfrost::ocr::pipeline::join_words(&refs);
-        println!(">>> Extracted text:\n{}", text);
+        println!(">>> Crop words total: {}", words.len());
+        for w in words.iter() {
+            println!("Crop word '{}' at crop_x={:.1}, crop_y={:.1} -> global_x={:.1}, global_y={:.1}, w={:.1}, h={:.1}",
+                w.text, w.x, w.y, w.x + 394.0, w.y + 258.0, w.w, w.h);
+        }
+    }
+}
+
+#[test]
+fn test_capture_now() {
+    if let Ok(img) = wayfrost::capture::capture_screen() {
+        println!(">>> Captured screen: {}x{}", img.width(), img.height());
+        let _ = img.save("/tmp/captured_live.png");
+    } else {
+        println!(">>> Capture failed!");
     }
 }

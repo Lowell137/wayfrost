@@ -329,6 +329,8 @@ pub fn run_tesseract_tsv(img: &DynamicImage, lang: &str) -> Result<Vec<DetectedW
         .arg("stdout")
         .arg("-l")
         .arg(tesseract_lang)
+        .arg("--psm")
+        .arg("6")
         .arg("tsv")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

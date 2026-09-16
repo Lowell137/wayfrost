@@ -7,7 +7,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use gtk4::{
     Align, Box, Button, CssProvider, DrawingArea, EventControllerKey, EventControllerMotion,
-    GestureDrag, Image, Orientation, Overlay, Picture, Popover, Separator,
+    GestureDrag, Image, Orientation, Overlay, Popover, Separator,
 };
 use image::{imageops, DynamicImage, GenericImageView};
 use libadwaita as adw;
@@ -52,32 +52,21 @@ pub fn build_overlay_window(app: &adw::Application) {
 
     let root_overlay = Overlay::new();
 
-    // 1. GPU-accelerated background picture (avoids 100% CPU Cairo redraw on every mouse frame!)
-    let bg_picture = Picture::new();
-    bg_picture.set_hexpand(true);
-    bg_picture.set_vexpand(true);
-    bg_picture.set_can_shrink(true);
+    // Convert screenshot to Cairo ImageSurface for exact 1:1 painting (zero letterboxing, zero offset)
+    let background_surface = screen_img
+        .as_ref()
+        .and_then(|img| image_to_cairo_surface(img).ok().map(Rc::new));
+    let (img_w, img_h) = screen_img
+        .as_ref()
+        .map(|img| img.dimensions())
+        .unwrap_or((1920, 1080));
 
-    if let Some(ref img) = screen_img {
-        let (w, h) = img.dimensions();
-        let rgba = img.to_rgba8();
-        let bytes = glib::Bytes::from_owned(rgba.into_raw());
-        let texture = gdk::MemoryTexture::new(
-            w as i32,
-            h as i32,
-            gdk::MemoryFormat::R8g8b8a8,
-            &bytes,
-            (w * 4) as usize,
-        );
-        bg_picture.set_paintable(Some(&texture));
-    }
-    root_overlay.set_child(Some(&bg_picture));
-
-    // Fullscreen transparent DrawingArea: overlays dimming, borders, and delicate word borders
+    // Fullscreen DrawingArea: paints original screenshot 1:1 + dimming + crisp word highlights
     let drawing_area = DrawingArea::new();
     drawing_area.set_can_target(true);
     drawing_area.set_hexpand(true);
     drawing_area.set_vexpand(true);
+    root_overlay.set_child(Some(&drawing_area));
 
     // Cache accent color ONCE at startup to avoid querying GSettings D-Bus on every frame
     let (ar, ag, ab, _) = get_accent_color(&drawing_area);
@@ -97,6 +86,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     let copy_timer: Rc<RefCell<Option<glib::SourceId>>> = Rc::new(RefCell::new(None));
 
     {
+        let surface = background_surface.clone();
         let locked_region = Rc::clone(&locked_region);
         let framing_drag = Rc::clone(&framing_drag);
         let all_words = Rc::clone(&all_words);
@@ -105,13 +95,29 @@ pub fn build_overlay_window(app: &adw::Application) {
         drawing_area.set_draw_func(move |_, cr, width, height| {
             let w = width as f64;
             let h = height as f64;
+            let (iw, ih) = (img_w as f64, img_h as f64);
+            let scale_x = w / iw.max(1.0);
+            let scale_y = h / ih.max(1.0);
+
+            let _ = cr.save();
+            cr.scale(scale_x, scale_y);
+
+            // 1. Paint original screenshot 1:1 with crystal clear quality
+            if let Some(ref surf) = surface {
+                let _ = cr.set_source_surface(&**surf, 0.0, 0.0);
+                let _ = cr.paint();
+            } else {
+                cr.set_source_rgb(0.08, 0.08, 0.1);
+                cr.rectangle(0.0, 0.0, iw, ih);
+                let _ = cr.fill();
+            }
 
             let f_drag = *framing_drag.borrow();
             let locked = *locked_region.borrow();
             let words = all_words.borrow();
             let selected = selected_indices.borrow();
 
-            // 1. Framing Drag or Persistent Locked Region Dimming
+            // 2. Framing Drag or Persistent Locked Region Dimming (all in 0..iw, 0..ih space)
             if let Some((start, curr)) = f_drag {
                 let sx = start.0.min(curr.0);
                 let sy = start.1.min(curr.1);
@@ -120,10 +126,10 @@ pub fn build_overlay_window(app: &adw::Application) {
 
                 // Dim unselected area
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.35);
-                cr.rectangle(0.0, 0.0, w, sy);
-                cr.rectangle(0.0, sy + sh, w, (h - (sy + sh)).max(0.0));
+                cr.rectangle(0.0, 0.0, iw, sy);
+                cr.rectangle(0.0, sy + sh, iw, (ih - (sy + sh)).max(0.0));
                 cr.rectangle(0.0, sy, sx, sh);
-                cr.rectangle(sx + sw, sy, (w - (sx + sw)).max(0.0), sh);
+                cr.rectangle(sx + sw, sy, (iw - (sx + sw)).max(0.0), sh);
                 let _ = cr.fill();
 
                 // Crisp accent frame border during active drag
@@ -134,10 +140,10 @@ pub fn build_overlay_window(app: &adw::Application) {
             } else if let Some((rx, ry, rw, rh)) = locked {
                 // PERSISTENT SELECTION RECTANGLE!
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.38);
-                cr.rectangle(0.0, 0.0, w, ry);
-                cr.rectangle(0.0, ry + rh, w, (h - (ry + rh)).max(0.0));
+                cr.rectangle(0.0, 0.0, iw, ry);
+                cr.rectangle(0.0, ry + rh, iw, (ih - (ry + rh)).max(0.0));
                 cr.rectangle(0.0, ry, rx, rh);
-                cr.rectangle(rx + rw, ry, (w - (rx + rw)).max(0.0), rh);
+                cr.rectangle(rx + rw, ry, (iw - (rx + rw)).max(0.0), rh);
                 let _ = cr.fill();
 
                 // Vibrant Libadwaita accent frame border
@@ -173,11 +179,11 @@ pub fn build_overlay_window(app: &adw::Application) {
             } else {
                 // Initial subtle scrim before region is selected
                 cr.set_source_rgba(0.0, 0.0, 0.0, 0.22);
-                cr.rectangle(0.0, 0.0, w, h);
+                cr.rectangle(0.0, 0.0, iw, ih);
                 let _ = cr.fill();
             }
 
-            // 2. Selected word boundaries:
+            // 3. Selected word boundaries:
             // Background is 100% TRANSPARENT (NO background fill), only 1.0px @accent_color stroke!
             // Notice: When selecting text, NO outer selection rectangle is drawn. Only the words!
             for &idx in selected.iter() {
@@ -188,9 +194,10 @@ pub fn build_overlay_window(app: &adw::Application) {
                     let _ = cr.stroke();
                 }
             }
+
+            let _ = cr.restore();
         });
     }
-    root_overlay.add_overlay(&drawing_area);
 
     // 2. Background task: extract word bounding boxes across full screen (in 1:1 pixel coords)
     let (tx, rx) = std::sync::mpsc::channel::<Vec<DetectedWord>>();
@@ -347,16 +354,24 @@ pub fn build_overlay_window(app: &adw::Application) {
             }
             floating_copy_btn.set_visible(false);
 
+            let da_w = da.width().max(1) as f64;
+            let da_h = da.height().max(1) as f64;
+            let to_img_x = img_w as f64 / da_w;
+            let to_img_y = img_h as f64 / da_h;
+
+            let img_x = start_x * to_img_x;
+            let img_y = start_y * to_img_y;
+
             let current_locked = *locked_region.borrow();
             let is_inside_locked = if let Some((rx, ry, rw, rh)) = current_locked {
-                start_x >= rx && start_x <= rx + rw && start_y >= ry && start_y <= ry + rh
+                img_x >= rx && img_x <= rx + rw && img_y >= ry && img_y <= ry + rh
             } else {
                 false
             };
 
             if is_inside_locked {
                 // Dragging INSIDE the persistent selection rectangle -> Text Selection
-                *text_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
+                *text_drag.borrow_mut() = Some(((img_x, img_y), (img_x, img_y)));
                 *framing_drag.borrow_mut() = None;
                 selected_indices.borrow_mut().clear();
                 *cached_text.borrow_mut() = None;
@@ -364,7 +379,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                 // Dragging OUTSIDE or when no region locked -> New Selection Rectangle framing
                 *locked_region.borrow_mut() = None;
                 *text_drag.borrow_mut() = None;
-                *framing_drag.borrow_mut() = Some(((start_x, start_y), (start_x, start_y)));
+                *framing_drag.borrow_mut() = Some(((img_x, img_y), (img_x, img_y)));
                 selected_indices.borrow_mut().clear();
                 *cached_text.borrow_mut() = None;
             }
@@ -381,9 +396,16 @@ pub fn build_overlay_window(app: &adw::Application) {
         let da = drawing_area.clone();
 
         gesture_drag.connect_drag_update(move |_, offset_x, offset_y| {
+            let da_w = da.width().max(1) as f64;
+            let da_h = da.height().max(1) as f64;
+            let to_img_x = img_w as f64 / da_w;
+            let to_img_y = img_h as f64 / da_h;
+            let off_x = offset_x * to_img_x;
+            let off_y = offset_y * to_img_y;
+
             let t_start_opt = text_drag.borrow().map(|(start, _)| start);
             if let Some(start) = t_start_opt {
-                let current = (start.0 + offset_x, start.1 + offset_y);
+                let current = (start.0 + off_x, start.1 + off_y);
                 *text_drag.borrow_mut() = Some((start, current));
 
                 let min_x = start.0.min(current.0);
@@ -415,7 +437,7 @@ pub fn build_overlay_window(app: &adw::Application) {
             } else {
                 let f_start_opt = framing_drag.borrow().map(|(start, _)| start);
                 if let Some(start) = f_start_opt {
-                    let current = (start.0 + offset_x, start.1 + offset_y);
+                    let current = (start.0 + off_x, start.1 + off_y);
                     *framing_drag.borrow_mut() = Some((start, current));
 
                     let min_x = start.0.min(current.0);
@@ -455,8 +477,15 @@ pub fn build_overlay_window(app: &adw::Application) {
         let schedule_tooltip = schedule_copy_tooltip.clone();
 
         gesture_drag.connect_drag_end(move |_, offset_x, offset_y| {
+            let da_w = da.width().max(1) as f64;
+            let da_h = da.height().max(1) as f64;
+            let to_img_x = img_w as f64 / da_w;
+            let to_img_y = img_h as f64 / da_h;
+            let off_x = offset_x * to_img_x;
+            let off_y = offset_y * to_img_y;
+
             if let Some((start, _)) = framing_drag.borrow_mut().take() {
-                let current = (start.0 + offset_x, start.1 + offset_y);
+                let current = (start.0 + off_x, start.1 + off_y);
                 let sx = start.0.min(current.0);
                 let sy = start.1.min(current.1);
                 let sw = (start.0 - current.0).abs();
@@ -506,7 +535,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                         sel.iter().filter_map(|&i| words.get(i)).collect();
                     if !sel_words.is_empty() {
                         *cached_text.borrow_mut() = Some(pipeline::join_words(&sel_words));
-                        schedule_tooltip(current.0, current.1);
+                        schedule_tooltip(current.0 / to_img_x, current.1 / to_img_y);
                     }
                     drop(words);
                     *selected_indices.borrow_mut() = sel;
@@ -518,7 +547,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                 }
                 da.queue_draw();
             } else if let Some((start, _)) = text_drag.borrow_mut().take() {
-                let current = (start.0 + offset_x, start.1 + offset_y);
+                let current = (start.0 + off_x, start.1 + off_y);
                 let sw = (start.0 - current.0).abs();
                 let sh = (start.1 - current.1).abs();
 
@@ -559,7 +588,7 @@ pub fn build_overlay_window(app: &adw::Application) {
                 };
 
                 if has_sel {
-                    schedule_tooltip(current.0, current.1);
+                    schedule_tooltip(current.0 / to_img_x, current.1 / to_img_y);
                 }
                 da.queue_draw();
             }
