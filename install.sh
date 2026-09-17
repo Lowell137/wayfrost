@@ -9,7 +9,7 @@ else
     OS="unknown"
 fi
 
-echo "Dağıtım algılandı: $OS"
+echo "Detected OS: $OS"
 
 case "$OS" in
     arch|manjaro|cachyos)
@@ -22,25 +22,25 @@ case "$OS" in
         sudo dnf install -y cargo rust gtk4-devel libadwaita-devel tesseract tesseract-langpack-tur tesseract-langpack-eng git
         ;;
     *)
-        echo "Uyarı: Dağıtım otomatik tanınamadı ($OS). Lütfen GTK4, Libadwaita, Tesseract ve Rust bağımlılıklarının kurulu olduğundan emin olun."
+        echo "Warning: Unsupported distro ($OS). Please ensure GTK4, Libadwaita, Tesseract, and Rust are installed."
         ;;
 esac
 
 # 2. Ensure Cargo env & Rust
 [[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env"
 if ! command -v cargo &> /dev/null; then
-    echo "Rust/Cargo kuruluyor..."
+    echo "Installing Rust/Cargo..."
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
     source "${HOME}/.cargo/env"
 fi
 
 # 3. Build & Install Binary
-echo "Wayfrost derleniyor..."
+echo "Building Wayfrost..."
 mkdir -p "${HOME}/.local/bin"
 cargo build --release
 cp target/release/wayfrost "${HOME}/.local/bin/wayfrost"
 chmod +x "${HOME}/.local/bin/wayfrost"
-echo "Binary kuruldu: ~/.local/bin/wayfrost"
+echo "Binary installed to: ~/.local/bin/wayfrost"
 
 # 4. Setup GNOME Shortcut
 if command -v gsettings >/dev/null 2>&1; then
@@ -61,7 +61,7 @@ if command -v gsettings >/dev/null 2>&1; then
     gsettings set "${SCHEMA}:${KEY_PATH}" name "Wayfrost Text Extractor"
     gsettings set "${SCHEMA}:${KEY_PATH}" command "${HOME}/.local/bin/wayfrost"
     gsettings set "${SCHEMA}:${KEY_PATH}" binding "<Super><Shift>t"
-    echo "GNOME kısayolu oluşturuldu: Super+Shift+T"
+    echo "GNOME shortcut created: Super+Shift+T"
 fi
 
 # 5. Install GNOME Shell Extension
@@ -71,9 +71,9 @@ if [ -d "$HOME/.local/share/gnome-shell" ] || command -v gnome-shell >/dev/null 
     cp -r gnome-extension/* "${EXT_DIR}/"
     if command -v gnome-extensions >/dev/null 2>&1; then
         gnome-extensions enable wayfrost@lowell || true
-        echo "GNOME extension (wayfrost@lowell) kuruldu ve etkinleştirildi."
-        echo "Not: GNOME Shell'i yeniden başlatmanız gerekebilir (X11 için Alt+F2 -> r -> Enter; Wayland için oturumu kapatıp açın)."
+        echo "GNOME extension (wayfrost@lowell installed and enabled."
+        echo "Note: If the extension doesn't register immediately, restart GNOME Shell (Press Alt+F2, type 'r', and press Enter; or log out and back in on Wayland)."
     fi
 fi
 
-echo "Kurulum tamamlandı!"
+echo "Installation complete!"
