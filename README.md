@@ -2,7 +2,7 @@
 
 Fast and lightweight native Wayland text extraction tool for GNOME and Wayland compositors (similar to Apple Live Text and Windows PowerToys Text Extractor).
 
-[![English](https://img.shields.io/badge/Language-English-blue)](#english) [![Turkish](https://img.shields.io/badge/Language-Türkçe-red)](#türkçe)
+[![English](https://img.shields.io/badge/Language-English-blue)](#english) [![Turkish](https://img.shields.io/badge/Language-Türkçe-red)](#türkçe) [![Website](https://img.shields.io/badge/Website-Live-green)](https://lowell137.github.io/wayfrost/)
 
 ![Wayfrost Screenshot](docs/screenshot.png)
 
