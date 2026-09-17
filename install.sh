@@ -64,4 +64,16 @@ if command -v gsettings >/dev/null 2>&1; then
     echo "GNOME kısayolu oluşturuldu: Super+Shift+T"
 fi
 
+# 5. Install GNOME Shell Extension
+if [ -d "$HOME/.local/share/gnome-shell" ] || command -v gnome-shell >/dev/null 2>&1; then
+    EXT_DIR="${HOME}/.local/share/gnome-shell/extensions/wayfrost@lowell"
+    mkdir -p "${EXT_DIR}"
+    cp -r gnome-extension/* "${EXT_DIR}/"
+    if command -v gnome-extensions >/dev/null 2>&1; then
+        gnome-extensions enable wayfrost@lowell || true
+        echo "GNOME extension (wayfrost@lowell) kuruldu ve etkinleştirildi."
+        echo "Not: GNOME Shell'i yeniden başlatmanız gerekebilir (X11 için Alt+F2 -> r -> Enter; Wayland için oturumu kapatıp açın)."
+    fi
+fi
+
 echo "Kurulum tamamlandı!"
