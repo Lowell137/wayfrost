@@ -1,0 +1,1 @@
+{"findings":"Rust/GTK4 project, no package.json, no web framework, no design tokens; screenshot at docs/screenshot.png; install facts from README/install.sh","framework":"none (static)","preserved":"README content, install commands, real screenshot","scanDate": "2026-09-17"}

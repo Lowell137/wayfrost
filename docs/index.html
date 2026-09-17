@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wayfrost — Wayland için yerel metin çıkarma</title>
+  <meta name="description" content="Wayfrost: GNOME ve Wayland için hızlı, hafif, yerel metin çıkarma aracı. Super+Shift+T ile seç, kopyala, yapıştır.">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#icerik">İçeriğe atla</a>
+
+  <header class="site-head">
+    <div class="wrap">
+      <a class="wordmark" href="#top">Wayfrost</a>
+      <nav class="site-nav" aria-label="Sayfa">
+        <a href="#nasil">Nasıl çalışır</a>
+        <a href="#ozellikler">Özellikler</a>
+        <a href="#kurulum">Kurulum</a>
+        <a class="btn btn-primary" href="https://github.com/Lowell137/wayfrost">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="icerik">
+    <section class="hero" id="top" aria-labelledby="baslik">
+      <div class="wrap hero-grid">
+        <div>
+          <p class="kicker">Wayland · GNOME · GTK4</p>
+          <h1 id="baslik">Ekrandaki yazıyı anında al.</h1>
+          <p class="lede">Wayfrost, Wayland üzerinde çalışan hafif ve yerel bir metin çıkarma aracı. Kısayola bas, alanı seç, metin panoda.</p>
+          <div class="cta-row">
+            <a class="btn btn-primary" href="#kurulum">Kurulum</a>
+            <a class="btn btn-ghost" href="https://github.com/Lowell137/wayfrost">Kaynağı gör</a>
+          </div>
+          <ul class="fact-list">
+            <li><span>Kısayol</span>Super + Shift + T</li>
+            <li><span>Çıktı</span>Doğrudan sistem panosuna</li>
+            <li><span>Kapsam</span>Türkçe ve İngilizce karakterler</li>
+          </ul>
+        </div>
+        <figure class="shot">
+          <img src="screenshot.png" alt="Wayfrost seçim arayüzü: ekrandaki kod üzerinden seçili alan ve alt araç çubuğu" width="1920" height="1080" loading="eager">
+          <figcaption>Gerçek uygulama ekranı — seçim alanı ve işlem çubuğu.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="section" id="nasil" aria-labelledby="nasil-baslik">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 id="nasil-baslik">Üç hareket, sıfır uğraş</h2>
+          <p>Ekran donar, alanı seçersin, metin tanınır ve panoya düşer. Başka pencere, başka adım yok.</p>
+        </div>
+        <ol class="steps">
+          <li>
+            <span class="step-no">01</span>
+            <h3>Kısayola bas</h3>
+            <p><kbd>Super</kbd> + <kbd>Shift</kbd> + <kbd>T</kbd> ile Wayfrost’u çağır. Kurulum bu kısayolu GNOME’a tanımlar.</p>
+          </li>
+          <li>
+            <span class="step-no">02</span>
+            <h3>Alanı seç</h3>
+            <p>Okumak istediğin bölgeyi çerçevele. Ters seçim ve boş seçim güvenli şekilde ele alınır.</p>
+          </li>
+          <li>
+            <span class="step-no">03</span>
+            <h3>Yapıştır</h3>
+            <p>Tanınan metin panoya yazılır. Terminalde ya da düzenleyicide doğrudan yapıştır.</p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section" id="ozellikler" aria-labelledby="ozellikler-baslik">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 id="ozellikler-baslik">Damıtılmış özellik seti</h2>
+          <p>README’deki gerçek kapsam — fazlası yok.</p>
+        </div>
+        <div class="spec-grid">
+          <div class="spec">
+            <h3>Türkçe tam destek</h3>
+            <p>ç, ğ, ı, İ, ö, ş, ü ve büyük harf karşılıkları kayıpsız tanınır.</p>
+          </div>
+          <div class="spec">
+            <h3>Doğru okuma sırası</h3>
+            <p>2B uzaysal satır kümeleme; metin karışmadan, satır sırasıyla gelir.</p>
+          </div>
+          <div class="spec">
+            <h3>Yerel arayüz</h3>
+            <p>GTK4 ve Libadwaita ile masaüstüne ait görünen hızlı bir seçim katmanı.</p>
+          </div>
+          <div class="spec">
+            <h3>Esnek tanıma</h3>
+            <p>Tesseract tessdata_best ve ONNX model desteği aynı kurulumda.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="section" id="kurulum" aria-labelledby="kurulum-baslik">
+      <div class="wrap">
+        <div class="section-head">
+          <h2 id="kurulum-baslik">Bir komutla kur</h2>
+          <p>Depoyu klonla, betiği çalıştır. Bağımlılıklar dağıtımına göre kurulur, ikili derlenir, kısayol tanımlanır.</p>
+        </div>
+        <pre class="code" tabindex="0">git clone https://github.com/Lowell137/wayfrost.git
+cd wayfrost
+chmod +x install.sh
+./install.sh</pre>
+        <details class="distro">
+          <summary>Arch / Manjaro / CachyOS bağımlılıkları</summary>
+          <pre class="code" tabindex="0">sudo pacman -S --needed --noconfirm base-devel rust cargo gtk4 libadwaita tesseract tesseract-data-tur tesseract-data-eng git openssl pkgconf</pre>
+        </details>
+        <details class="distro">
+          <summary>Debian / Ubuntu / Pop!_OS / Mint bağımlılıkları</summary>
+          <pre class="code" tabindex="0">sudo apt update &amp;&amp; sudo apt install -y build-essential cargo rustc libgtk-4-dev libadwaita-1-dev tesseract-ocr tesseract-ocr-tur tesseract-ocr-eng git libssl-dev pkg-config</pre>
+        </details>
+        <details class="distro">
+          <summary>Fedora / RHEL / CentOS bağımlılıkları</summary>
+          <pre class="code" tabindex="0">sudo dnf install -y gcc-c++ cargo rust gtk4-devel libadwaita-devel tesseract tesseract-langpack-tur tesseract-langpack-eng git openssl-devel pkg-config</pre>
+        </details>
+        <div class="paths">
+          <div class="path">
+            <span>İkili</span>
+            <strong>~/.local/bin/wayfrost</strong>
+          </div>
+          <div class="path">
+            <span>GNOME uzantısı</span>
+            <strong>wayfrost@lowell</strong>
+          </div>
+        </div>
+        <p class="note">Not: Uzantı hemen görünmezse GNOME Shell’i yeniden başlat ya da oturumu kapatıp aç. Çıkış için seçim ekranında <kbd>ESC</kbd> yeterli; arkada pencere bırakmaz.</p>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-foot">
+    <div class="wrap">
+      <strong>Wayfrost</strong>
+      <div class="foot-links">
+        <a href="https://github.com/Lowell137/wayfrost">GitHub</a>
+        <a href="https://github.com/Lowell137/wayfrost#türkçe">Türkçe README</a>
+        <a href="https://github.com/Lowell137/wayfrost#english">English README</a>
+      </div>
+      <p>Saf Rust · Wayland · GTK4 — bu sayfa tanıtım amaçlı statik bir özettir, ürünün kendisi depodadır.</p>
+    </div>
+  </footer>
+</body>
+</html>
