@@ -11,14 +11,15 @@ Wayland ve GNOME ortamları için geliştirilmiş, hızlı ve hafif ekran metin 
 - GTK4 ve Libadwaita tabanlı şık arayüz.
 - Tesseract `tessdata_best` ve ONNX model desteği.
 
-## Kurulum
+## Otomatik Kurulum
 
-Depoyu klonlayın ve kurulum scriptini çalıştırın:
+Arch Linux, Debian, Ubuntu ve Fedora destekleyen tek komutluk kurulum scripti:
 
 ```bash
 git clone https://github.com/Lowell137/wayfrost.git
 cd wayfrost
-./scripts/setup-shortcut.sh
+chmod +x install.sh
+./install.sh
 ```
 
-Bu script binary dosyasını `~/.local/bin/wayfrost` konumuna kurar ve `<Super><Shift>t` kısayolunu otomatik tanımlar.
+Bu script eksik paketleri (GTK4, Libadwaita, Tesseract, Rust) dağıtınıza göre otomatik kurar, binary dosyasını `~/.local/bin/wayfrost` altına derler ve `<Super><Shift>t` kısayolunu tanımlar.
