@@ -108,7 +108,7 @@ pub fn build_overlay_window(app: &adw::Application) {
     let copy_icon = Image::from_icon_name("edit-copy-symbolic");
     copy_icon.set_pixel_size(20);
     floating_copy_btn.set_child(Some(&copy_icon));
-    floating_copy_btn.set_tooltip_text(Some("Kopyala"));
+    floating_copy_btn.set_tooltip_text(Some("Copy"));
     floating_copy_btn.set_halign(Align::Start);
     floating_copy_btn.set_valign(Align::Start);
     floating_copy_btn.set_visible(false);
@@ -322,13 +322,13 @@ pub fn build_overlay_window(app: &adw::Application) {
                 } else {
                     trimmed.to_string()
                 };
-                clipboard::send_notification("Wayfrost — Kopyalandı", &preview);
+                clipboard::send_notification("Wayfrost — Copied", &preview);
 
                 if let Some(win) = window_weak.upgrade() {
                     win.close();
                 }
             } else {
-                clipboard::send_notification("Wayfrost", "Seçilen alanda metin bulunamadı");
+                clipboard::send_notification("Wayfrost", "No text found in selected area");
             }
         }
     };
