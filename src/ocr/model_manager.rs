@@ -60,6 +60,18 @@ pub fn ensure_models() -> Result<ModelPaths> {
     download_if_missing(REC_MODEL_URL, &rec_model)?;
     download_if_missing(KEYS_DICT_URL, &dict_file)?;
 
+    let tessdata_dir = models_dir.join("tessdata");
+    let _ = fs::create_dir_all(&tessdata_dir);
+    let tur_trained = tessdata_dir.join("tur.traineddata");
+    let eng_trained = tessdata_dir.join("eng.traineddata");
+    let _ = download_if_missing("https://github.com/tesseract-ocr/tessdata_best/raw/main/tur.traineddata", &tur_trained);
+    let _ = download_if_missing("https://github.com/tesseract-ocr/tessdata_best/raw/main/eng.traineddata", &eng_trained);
+    let sys_configs = Path::new("/usr/share/tessdata/configs");
+    let target_configs = tessdata_dir.join("configs");
+    if sys_configs.exists() && !target_configs.exists() {
+        let _ = Command::new("cp").arg("-r").arg(sys_configs).arg(&target_configs).status();
+    }
+
     Ok(ModelPaths {
         det_model,
         rec_model,

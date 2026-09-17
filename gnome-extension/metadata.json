@@ -1,0 +1,14 @@
+{
+  "uuid": "wayfrost@lowell",
+  "name": "Wayfrost Screen Capture Bridge",
+  "description": "Instant, silent screen capture bridge for Wayfrost OCR.",
+  "shell-version": [
+    "45",
+    "46",
+    "47",
+    "48",
+    "49",
+    "50"
+  ],
+  "version": 1
+}
