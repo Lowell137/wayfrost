@@ -13,16 +13,16 @@ echo "Detected OS: $OS"
 
 case "$OS" in
     arch|manjaro|cachyos)
-        sudo pacman -S --needed --noconfirm rust cargo gtk4 libadwaita tesseract tesseract-data-tur tesseract-data-eng git
+        sudo pacman -S --needed --noconfirm rust cargo gtk4 libadwaita tesseract tesseract-data-tur tesseract-data-eng git openssl pkgconf
         ;;
     debian|ubuntu|pop|linuxmint)
-        sudo apt update && sudo apt install -y cargo rustc libgtk-4-dev libadwaita-1-dev tesseract-ocr tesseract-ocr-tur tesseract-ocr-eng git
+        sudo apt update && sudo apt install -y cargo rustc libgtk-4-dev libadwaita-1-dev tesseract-ocr tesseract-ocr-tur tesseract-ocr-eng git libssl-dev pkg-config
         ;;
     fedora|rhel|centos)
-        sudo dnf install -y cargo rust gtk4-devel libadwaita-devel tesseract tesseract-langpack-tur tesseract-langpack-eng git
+        sudo dnf install -y cargo rust gtk4-devel libadwaita-devel tesseract tesseract-langpack-tur tesseract-langpack-eng git openssl-devel pkg-config
         ;;
     *)
-        echo "Warning: Unsupported distro ($OS). Please ensure GTK4, Libadwaita, Tesseract, and Rust are installed."
+        echo "Warning: Unsupported distro ($OS). Please ensure GTK4, Libadwaita, Tesseract, OpenSSL, and Rust are installed."
         ;;
 esac
 
@@ -71,7 +71,7 @@ if [ -d "$HOME/.local/share/gnome-shell" ] || command -v gnome-shell >/dev/null 
     cp -r gnome-extension/* "${EXT_DIR}/"
     if command -v gnome-extensions >/dev/null 2>&1; then
         gnome-extensions enable wayfrost@lowell || true
-        echo "GNOME extension (wayfrost@lowell installed and enabled."
+        echo "GNOME extension (wayfrost@lowell) installed and enabled."
         echo "Note: If the extension doesn't register immediately, restart GNOME Shell (Press Alt+F2, type 'r', and press Enter; or log out and back in on Wayland)."
     fi
 fi
