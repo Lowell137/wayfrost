@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 set -e
 
-WAYFROST_BIN="${HOME}/.local/bin/wayfrost"
+# Source cargo if present
+[[ -f "${HOME}/.cargo/env" ]] && source "${HOME}/.cargo/env"
 
+if ! command -v cargo &> /dev/null; then
+    echo "Hata: Rust/Cargo bulunamadı. Lütfen https://rustup.rs adresinden Rust kurun."
+    exit 1
+fi
+
+WAYFROST_BIN="${HOME}/.local/bin/wayfrost"
 # 1. Build release binary and install to ~/.local/bin
 mkdir -p "${HOME}/.local/bin"
 cargo build --release
