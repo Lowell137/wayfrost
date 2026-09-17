@@ -2,10 +2,6 @@ use anyhow::{Context, Result};
 use image::DynamicImage;
 use std::process::Command;
 
-/// Captures the full Wayland screen.
-/// 1. Tries `grim -` (wlroots / Hyprland / Sway — direct pipe, no file).
-/// 2. Tries Wayfrost GNOME extension DBus (instant, silent, no camera sound).
-/// 3. Falls back to XDG Desktop Portal via `gdbus` CLI (GNOME / KDE Wayland).
 pub fn capture_screen() -> Result<DynamicImage> {
     // 1. Fast native grim (wlroots compositors)
     if let Ok(output) = Command::new("grim").arg("-").output() {
@@ -17,13 +13,23 @@ pub fn capture_screen() -> Result<DynamicImage> {
         }
     }
 
-    // 2. Wayfrost GNOME extension (instant, silent — no portal, no camera sound)
+    // 2. Wayfrost GNOME extension (instant, silent)
     if let Ok(img) = capture_via_gnome_extension() {
         return Ok(img);
     }
 
-    // 3. XDG Desktop Portal fallback (universal)
-    log::info!("Using XDG Desktop Portal via gdbus");
+    // 3. GNOME Screenshot (reliable in GNOME / VMs)
+    if let Ok(img) = capture_via_gnome_screenshot() {
+        return Ok(img);
+    }
+
+    // 4. ImageMagick import (universal fallback for X11/XWayland/VMs)
+    if let Ok(img) = capture_via_imagemagick() {
+        return Ok(img);
+    }
+
+    // 5. XDG Desktop Portal fallback (interactive)
+    log::info!("Using XDG Desktop Portal via gdbus (interactive)");
     capture_via_portal()
 }
 
@@ -129,8 +135,35 @@ fn capture_via_portal() -> Result<DynamicImage> {
 
         std::thread::sleep(Duration::from_millis(50));
     }
-
     anyhow::bail!("XDG Desktop Portal screenshot timed out — no valid PNG found in Pictures");
+}
+
+fn capture_via_gnome_screenshot() -> Result<DynamicImage> {
+    let tmp_path = format!("/tmp/wayfrost_gs_{}.png", std::process::id());
+    let status = Command::new("gnome-screenshot")
+        .args(["-f", &tmp_path])
+        .status()?;
+    if status.success() {
+        let img = image::open(&tmp_path)?;
+        let _ = std::fs::remove_file(&tmp_path);
+        log::info!("Screen captured via gnome-screenshot");
+        return Ok(img);
+    }
+    anyhow::bail!("gnome-screenshot failed")
+}
+
+fn capture_via_imagemagick() -> Result<DynamicImage> {
+    let tmp_path = format!("/tmp/wayfrost_im_{}.png", std::process::id());
+    let status = Command::new("import")
+        .args(["-window", "root", &tmp_path])
+        .status()?;
+    if status.success() {
+        let img = image::open(&tmp_path)?;
+        let _ = std::fs::remove_file(&tmp_path);
+        log::info!("Screen captured via ImageMagick import");
+        return Ok(img);
+    }
+    anyhow::bail!("ImageMagick import failed")
 }
 
 fn dirs_home() -> Result<std::path::PathBuf> {
