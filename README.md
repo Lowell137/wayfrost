@@ -16,7 +16,7 @@ Wayland ve GNOME ortamları için geliştirilmiş, hızlı ve hafif ekran metin 
 Depoyu klonlayın ve kurulum scriptini çalıştırın:
 
 ```bash
-git clone https://github.com/LOWELL-dev/wayfrost.git
+git clone https://github.com/Lowell137/wayfrost.git
 cd wayfrost
 ./scripts/setup-shortcut.sh
 ```
