@@ -4,7 +4,8 @@ Fast and lightweight native Wayland text extraction tool for GNOME and Wayland c
 
 [![English](https://img.shields.io/badge/Language-English-blue)](#english) [![Turkish](https://img.shields.io/badge/Language-Türkçe-red)](#türkçe) [![Website](https://img.shields.io/badge/Website-Live-green)](https://lowell137.github.io/wayfrost/)
 
-![Wayfrost Screenshot](docs/screenshot.png)
+![Wayfrost Screenshot](<img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/45ddcd7c-651f-461e-8e8b-13b1138e7123" />
+)
 
 ---
 
