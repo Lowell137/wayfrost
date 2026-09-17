@@ -35,6 +35,26 @@ pub fn build_overlay_window(app: &adw::Application) {
         .decorated(false)
         .resizable(false)
         .build();
+    window.set_cursor_from_name(Some("crosshair"));
+
+    let root_overlay = Overlay::new();
+    window.set_child(Some(&root_overlay));
+
+    // AI Mode Switcher Header
+    let header_box = gtk::Box::new(Orientation::Horizontal, 6);
+    header_box.set_halign(Align::End);
+    header_box.set_valign(Align::Start);
+    header_box.set_margin_top(12);
+    header_box.set_margin_end(12);
+    
+    let ai_button = gtk::Button::builder()
+        .label("AI Mode")
+        .icon_name("system-run-symbolic")
+        .build();
+    ai_button.connect_clicked(move |_| {
+        println!("AI Modal needed here");
+    });
+
 
     window.add_css_class("overlay-window");
     window.set_cursor_from_name(Some("crosshair"));
