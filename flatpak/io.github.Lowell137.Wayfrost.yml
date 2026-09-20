@@ -1,0 +1,126 @@
+app-id: io.github.Lowell137.Wayfrost
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+command: wayfrost
+
+finish-args:
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --share=network
+  - --talk-name=org.freedesktop.portal.Desktop
+  # Wayfrost GNOME extension D-Bus bridge (the working silent-capture backend on GNOME)
+  - --talk-name=org.wayfrost.Capture
+  # The extension writes the captured PNG into ~/.cache/wayfrost (same dir the app
+  # already uses for models), which is bind-mounted below — so the sandbox reads it
+  # with no broad /tmp access. (GNOME's Screenshot portal does NOT support silent
+  # interactive:false capture and returns "cancelled", hence the extension backend.)
+  # Models & cache directory (ONNX models download here at first run)
+  - --filesystem=~/.cache/wayfrost:create
+  - --filesystem=xdg-pictures
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - /share/doc
+  - '*.la'
+  - '*.a'
+
+modules:
+  - modules/leptonica.json
+  - modules/tesseract.json
+  - modules/tessdata.json
+  - modules/onnxruntime.json
+
+  - name: wayfrost
+    buildsystem: simple
+    build-options:
+      append-path: /usr/lib/sdk/rust-stable/bin
+      env:
+        CARGO_HOME: /run/build/wayfrost/cargo
+        ORT_LIB_LOCATION: /app/lib
+        ORT_PREFER_DYNAMIC_LINK: "1"
+    sources:
+      - type: dir
+        path: ..
+        dest: wayfrost
+      - generated-sources.json
+      - type: file
+        path: icons/org.wayfrost.Wayfrost.svg
+        dest: wayfrost-assets/icons
+      - type: dir
+        path: icons/hicolor
+        dest: wayfrost-assets/icons/hicolor
+      - type: file
+        path: metainfo/org.wayfrost.Wayfrost.metainfo.xml
+        dest: wayfrost-assets/metainfo
+      - type: shell
+        commands:
+          # Override the auto-generated $CARGO_HOME/config with an absolute
+          # vendor path so cargo --offline finds the vendored crates regardless
+          # of the working directory it's invoked from.
+          - mkdir -p wayfrost/.cargo
+          - |
+            cat > wayfrost/.cargo/config.toml <<'EOF'
+            [source.crates-io]
+            replace-with = "vendored-sources"
+
+            [source.vendored-sources]
+            directory = "/run/build/wayfrost/cargo/vendor"
+            EOF
+          - |
+            cat > cargo/config.toml <<'EOF'
+            [source.crates-io]
+            replace-with = "vendored-sources"
+
+            [source.vendored-sources]
+            directory = "/run/build/wayfrost/cargo/vendor"
+            EOF
+          - rm -f cargo/config
+    build-commands:
+      # -------- Build-time patches (upstream source untouched) --------
+      # 1. Neutralize pkexec auto-install of Ollama (Flathub policy violation).
+      - sed -i 's|Command::new("pkexec")|Command::new("/bin/false")|g' wayfrost/src/ai_manager.rs
+
+      # 2. Align app-id (GTK Application ID must match flatpak app-id).
+      - sed -i 's|"org.wayfrost.Wayfrost"|"io.github.Lowell137.Wayfrost"|g' wayfrost/src/constants.rs
+      - mv wayfrost/org.wayfrost.Wayfrost.desktop wayfrost/io.github.Lowell137.Wayfrost.desktop
+      - sed -i 's|^Icon=.*|Icon=io.github.Lowell137.Wayfrost|' wayfrost/io.github.Lowell137.Wayfrost.desktop
+
+      # 3. Disable `ort` crate's build-time binary download; link against the
+      #    system onnxruntime we installed via /app/lib. Keep default features
+      #    except download-binaries so we don't drag in `libloading` (which
+      #    `load-dynamic` would need but isn't in Cargo.lock).
+      - sed -i 's|^ort = .*|ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "ndarray", "tracing", "tls-native"] }|' wayfrost/Cargo.toml
+
+      # -------- Build --------
+      - cd wayfrost && cargo build --release --offline --verbose 2>&1 | tail -120
+
+      # -------- Install --------
+      # 4. Align the metainfo <id> and its desktop-id launchable with the flatpak
+      #    app-id, else appstreamcli filters the component (filters-but-no-output).
+      #    Also drop the <screenshots> block for the local build: appstreamcli's
+      #    media worker downloads each screenshot URL during compose, and the URL
+      #    404s (not yet pushed), aborting the build. Kept in committed metainfo
+      #    for the eventual Flathub submission.
+      - |
+        sed -i \
+          -e 's|<id>org.wayfrost.Wayfrost</id>|<id>io.github.Lowell137.Wayfrost</id>|' \
+          -e 's|<launchable type="desktop-id">org.wayfrost.Wayfrost.desktop</launchable>|<launchable type="desktop-id">io.github.Lowell137.Wayfrost.desktop</launchable>|' \
+          -e '/<screenshots>/,/<\/screenshots>/d' \
+          wayfrost-assets/metainfo/org.wayfrost.Wayfrost.metainfo.xml
+      - install -Dm755 wayfrost/target/release/wayfrost /app/bin/wayfrost
+      - install -Dm644 wayfrost/io.github.Lowell137.Wayfrost.desktop /app/share/applications/io.github.Lowell137.Wayfrost.desktop
+      # Install pre-rendered PNG icons (NOT the scalable SVG): the GNOME-49 SDK /
+      # host appstreamcli asc-mediaworker aborts the compose step when it tries to
+      # rasterize an SVG icon via libvips (E: media-worker-error). PNGs in fixed
+      # hicolor sizes let appstream build the app-info icon cache without SVG decode.
+      - |
+        for sdir in wayfrost-assets/icons/hicolor/*x*/apps; do
+          size=$(basename "$(dirname "$sdir")")
+          install -Dm644 "$sdir/io.github.Lowell137.Wayfrost.png" \
+            "/app/share/icons/hicolor/$size/apps/io.github.Lowell137.Wayfrost.png"
+        done
+      - install -Dm644 wayfrost-assets/metainfo/org.wayfrost.Wayfrost.metainfo.xml /app/share/metainfo/io.github.Lowell137.Wayfrost.metainfo.xml

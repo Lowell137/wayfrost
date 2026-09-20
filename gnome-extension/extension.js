@@ -45,8 +45,14 @@ class WayfrostCaptureDBus extends GObject.Object {
     async CaptureScreenAsync(_params, invocation) {
         try {
             const shooter = new Shell.Screenshot();
-            const filePath = `/tmp/wayfrost_${GLib.get_monotonic_time()}.png`;
+            const filePath = GLib.build_filenamev([
+                GLib.get_home_dir(),
+                '.cache',
+                'wayfrost',
+                `wayfrost_${GLib.get_monotonic_time()}.png`,
+            ]);
             const file = Gio.File.new_for_path(filePath);
+            file.make_parent_directories(null);
             const stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
             await shooter.screenshot(false, stream);
             stream.close(null);

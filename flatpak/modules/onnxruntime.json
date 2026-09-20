@@ -1,0 +1,20 @@
+{
+  "name": "onnxruntime",
+  "buildsystem": "simple",
+  "build-commands": [
+    "mkdir -p /app/lib /app/share/licenses/onnxruntime",
+    "cp -a lib/libonnxruntime.so.1.22.0 /app/lib/",
+    "cp -a lib/libonnxruntime.so.1 /app/lib/",
+    "cp -a lib/libonnxruntime.so /app/lib/",
+    "cp -a lib/libonnxruntime_providers_shared.so /app/lib/",
+    "install -m644 LICENSE /app/share/licenses/onnxruntime/LICENSE"
+  ],
+  "sources": [
+    {
+      "type": "archive",
+      "url": "https://github.com/microsoft/onnxruntime/releases/download/v1.22.0/onnxruntime-linux-x64-1.22.0.tgz",
+      "sha256": "8344d55f93d5bc5021ce342db50f62079daf39aaafb5d311a451846228be49b3",
+      "strip-components": 1
+    }
+  ]
+}

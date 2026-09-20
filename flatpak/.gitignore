@@ -1,0 +1,6 @@
+build-dir/
+repo/
+*.flatpakref
+.flatpak-builder/
+# Built artifacts — never commit the (large) bundle or its exported repo
+*.flatpak

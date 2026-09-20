@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.wayfrost.Wayfrost</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Wayfrost</name>
+  <summary>Screen text extractor for Wayland (Live Text / PowerToys-style)</summary>
+
+  <description>
+    <p>
+      Wayfrost captures a region of your screen and returns the extracted text
+      to your clipboard. It works on GNOME, Hyprland, KDE, and other Wayland
+      compositors through XDG Desktop Portal, optional Wayland-native tools
+      (grim), or a companion GNOME Shell extension for silent instant capture.
+    </p>
+    <p>
+      Features:
+    </p>
+    <ul>
+      <li>Full Turkish and English OCR (ç, ğ, ı, ö, ş, ü supported)</li>
+      <li>Two backends: Tesseract (bundled) and PP-OCR ONNX model</li>
+      <li>2D spatial line clustering for correct reading order</li>
+      <li>Keyboard-first selection, click-drag a region, text lands in clipboard</li>
+    </ul>
+  </description>
+
+  <categories>
+    <category>Utility</category>
+    <category>OCR</category>
+  </categories>
+
+  <keywords>
+    <keyword>OCR</keyword>
+    <keyword>text extractor</keyword>
+    <keyword>live text</keyword>
+    <keyword>wayland</keyword>
+    <keyword>screenshot</keyword>
+  </keywords>
+
+  <url type="homepage">https://github.com/Lowell137/wayfrost</url>
+  <url type="bugtracker">https://github.com/Lowell137/wayfrost/issues</url>
+  <url type="vcs-browser">https://github.com/Lowell137/wayfrost</url>
+
+  <developer id="io.github.lowell137">
+    <name>Lowell</name>
+  </developer>
+
+  <launchable type="desktop-id">org.wayfrost.Wayfrost.desktop</launchable>
+
+  <content_rating type="oars-1.1"/>
+
+  <releases>
+    <release version="0.1.0" date="2026-09-17">
+      <description>
+        <p>Initial release.</p>
+      </description>
+    </release>
+  </releases>
+
+  <screenshots>
+    <screenshot type="default">
+      <caption>Wayfrost selection overlay</caption>
+      <image>https://raw.githubusercontent.com/Lowell137/wayfrost/main/docs/screenshot.png</image>
+    </screenshot>
+  </screenshots>
+</component>
