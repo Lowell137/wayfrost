@@ -116,9 +116,9 @@ fn capture_via_portal() -> Result<DynamicImage> {
         None,
         DBusSignalFlags::NONE,
         move |_c, _s, _p, _i, _m, parameters| {
+            // Response signal is (u a{sv}); index 1 is the results dict, not a boxed variant.
             let response: u32 = parameters.child_get(0);
-            let results: glib::Variant = parameters.child_get(1);
-            let map: HashMap<String, glib::Variant> = results.get().unwrap_or_default();
+            let map: HashMap<String, glib::Variant> = parameters.child_get(1);
             let uri = map
                 .get("uri")
                 .and_then(|v| v.get::<String>())
