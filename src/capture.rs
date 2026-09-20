@@ -28,13 +28,11 @@ pub fn capture_screen() -> Result<DynamicImage> {
         return Ok(img);
     }
 
-    // No silent backend available. On GNOME/Wayland the only picker-free capture
-    // is the Wayfrost extension; GNOME itself blocks silent portal capture
-    // (interactive:false -> cancelled) and org.gnome.Shell.Screenshot (AccessDenied).
-    anyhow::bail!(
-        "No screen-capture backend available. On GNOME/Wayland install & enable the \
-         Wayfrost extension, then log out and back in once so the shell reloads it."
-    )
+    // 5. XDG Desktop Portal screenshot (extension-free fallback). GNOME only allows
+    // an interactive capture, so this pops the desktop's region picker; the returned
+    // file lands in ~/Pictures/Screenshots, which the sandbox can read (xdg-pictures).
+    log::info!("No silent backend; falling back to XDG Desktop Portal (interactive picker)");
+    capture_via_portal()
 }
 
 /// Calls org.wayfrost.Capture.CaptureScreen — wayfrost@lowell GNOME extension.
@@ -67,6 +65,97 @@ fn capture_via_gnome_extension() -> Result<DynamicImage> {
 
     let img = image::load_from_memory(&data).context("failed to decode PNG from extension")?;
     log::info!("Screen captured via Wayfrost GNOME extension (bytes over D-Bus)");
+    Ok(img)
+}
+
+/// Extension-free fallback: XDG Desktop Portal interactive screenshot.
+/// GNOME refuses silent capture (interactive:false -> cancelled), so this shows
+/// the desktop's region picker. The response gives a `file://` URI, which GNOME
+/// writes into ~/Pictures/Screenshots (readable from the sandbox via xdg-pictures).
+fn capture_via_portal() -> Result<DynamicImage> {
+    use gtk4::gio::{self, DBusCallFlags, DBusSignalFlags};
+    use glib::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let conn = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
+        .context("no session D-Bus connection")?;
+
+    let mut options: HashMap<String, glib::Variant> = HashMap::new();
+    options.insert("interactive".to_string(), glib::Variant::from(true));
+    let params = (String::new(), options).to_variant(); // (s parent_window, a{sv})
+
+    let reply = conn
+        .call_sync(
+            Some("org.freedesktop.portal.Desktop"),
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Screenshot",
+            "Screenshot",
+            Some(&params),
+            glib::VariantTy::new("(o)").ok(),
+            DBusCallFlags::NONE,
+            5000,
+            gio::Cancellable::NONE,
+        )
+        .context("portal Screenshot call failed (no portal backend?)")?;
+    let request_path: String = reply.child_get(0);
+
+    // Await Request::Response(u response, a{sv} results) on that object path.
+    let loop_ = glib::MainLoop::new(None, false);
+    let outcome: Arc<Mutex<Option<(u32, String)>>> = Arc::new(Mutex::new(None));
+    let cb_loop = loop_.clone();
+    let cb_out = outcome.clone();
+    let sub = conn.signal_subscribe(
+        Some("org.freedesktop.portal.Desktop"),
+        Some("org.freedesktop.portal.Request"),
+        Some("Response"),
+        Some(&request_path),
+        None,
+        DBusSignalFlags::NONE,
+        move |_c, _s, _p, _i, _m, parameters| {
+            let response: u32 = parameters.child_get(0);
+            let results: HashMap<String, glib::Variant> = parameters.child_get(1);
+            let uri = results
+                .get("uri")
+                .and_then(|v| v.str().map(str::to_string))
+                .unwrap_or_default();
+            *cb_out.lock().unwrap() = Some((response, uri));
+            cb_loop.quit();
+        },
+    );
+
+    let to_loop = loop_.clone();
+    let to_out = outcome.clone();
+    glib::timeout_add_local(Duration::from_secs(60), move || {
+        if to_out.lock().unwrap().is_none() {
+            log::warn!("portal screenshot timed out after 60s");
+            to_loop.quit();
+        }
+        glib::ControlFlow::Break
+    });
+
+    loop_.run();
+    conn.signal_unsubscribe(sub);
+
+    let (response, uri) = outcome
+        .lock()
+        .unwrap()
+        .take()
+        .context("portal screenshot produced no response")?;
+    anyhow::ensure!(
+        response == 0,
+        "portal screenshot cancelled or denied (code {response})"
+    );
+    anyhow::ensure!(!uri.is_empty(), "portal returned an empty uri");
+
+    // The URI is percent-encoded (GNOME uses spaces in filenames). Decode it.
+    let (path, _frag) =
+        glib::filename_from_uri(&uri).context("portal returned a non-local file uri")?;
+    let img = image::open(&path)
+        .with_context(|| format!("cannot open portal screenshot: {}", path.display()))?;
+    let _ = std::fs::remove_file(&path);
+    log::info!("Screen captured via XDG Desktop Portal (interactive)");
     Ok(img)
 }
 
