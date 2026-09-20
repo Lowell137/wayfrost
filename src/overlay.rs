@@ -107,6 +107,24 @@ pub fn build_overlay_window(app: &adw::Application) {
             cr.set_source_rgb(0.08, 0.08, 0.1);
             cr.rectangle(0.0, 0.0, w as f64, h as f64);
             let _ = cr.fill();
+            cr.set_source_rgb(0.9, 0.9, 0.92);
+            let _ = cr.select_font_face(
+                "Sans",
+                cairo::FontSlant::Normal,
+                cairo::FontWeight::Normal,
+            );
+            cr.set_font_size(20.0);
+            let lines = [
+                "Ekran yakalanamadi.",
+                "GNOME/Wayland icin Wayfrost eklentisini kurup etkinlestirin,",
+                "ardindan bir kez oturumu kapatip acin.",
+            ];
+            let y = h as f64 / 2.0 - (lines.len() as f64 * 14.0);
+            for (i, line) in lines.iter().enumerate() {
+                let tw = cr.text_extents(line).map(|e| e.width()).unwrap_or(0.0);
+                let _ = cr.move_to(w as f64 / 2.0 - tw / 2.0, y + i as f64 * 28.0);
+                let _ = cr.show_text(line);
+            }
         });
         root_overlay.set_child(Some(&fallback));
     }
