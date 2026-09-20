@@ -10,12 +10,12 @@ finish-args:
   - --device=dri
   - --share=network
   - --talk-name=org.freedesktop.portal.Desktop
-  # Wayfrost GNOME extension D-Bus bridge (the working silent-capture backend on GNOME)
+  # Wayfrost GNOME extension D-Bus bridge (the working silent-capture backend on GNOME).
+  # The extension captures into memory and returns the raw PNG bytes over D-Bus, so the
+  # sandbox shares NO filesystem path with gnome-shell — no /tmp, no bind-mounted cache.
+  # (GNOME's Screenshot portal does NOT support silent interactive:false capture and
+  # returns "cancelled", hence the extension backend.)
   - --talk-name=org.wayfrost.Capture
-  # The extension writes the captured PNG into ~/.cache/wayfrost (same dir the app
-  # already uses for models), which is bind-mounted below — so the sandbox reads it
-  # with no broad /tmp access. (GNOME's Screenshot portal does NOT support silent
-  # interactive:false capture and returns "cancelled", hence the extension backend.)
   # Models & cache directory (ONNX models download here at first run)
   - --filesystem=~/.cache/wayfrost:create
   - --filesystem=xdg-pictures

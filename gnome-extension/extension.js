@@ -12,7 +12,7 @@ const CAPTURE_XML = `
   <interface name="${SERVICE_NAME}">
     <method name="CaptureScreen">
       <arg name="ok" type="b" direction="out"/>
-      <arg name="path" type="s" direction="out"/>
+      <arg name="data" type="ay" direction="out"/>
     </method>
   </interface>
 </node>
@@ -45,21 +45,17 @@ class WayfrostCaptureDBus extends GObject.Object {
     async CaptureScreenAsync(_params, invocation) {
         try {
             const shooter = new Shell.Screenshot();
-            const filePath = GLib.build_filenamev([
-                GLib.get_home_dir(),
-                '.cache',
-                'wayfrost',
-                `wayfrost_${GLib.get_monotonic_time()}.png`,
-            ]);
-            const file = Gio.File.new_for_path(filePath);
-            file.make_parent_directories(null);
-            const stream = file.replace(null, false, Gio.FileCreateFlags.NONE, null);
-            await shooter.screenshot(false, stream);
-            stream.close(null);
-            invocation.return_value(new GLib.Variant('(bs)', [true, filePath]));
+            // Capture straight into memory and return the PNG bytes over D-Bus.
+            // No temp file, so the Flatpak sandbox never needs to share a
+            // filesystem path with gnome-shell.
+            const memStream = new Gio.MemoryOutputStream({ dynamic: true });
+            await shooter.screenshot(false, memStream);
+            const bytes = memStream.steal_as_bytes();
+            const data = bytes ? bytes.get_data() : new Uint8Array(0);
+            invocation.return_value(new GLib.Variant('(bay)', [true, data]));
         } catch (error) {
             console.error(`[Wayfrost] Capture failed: ${error.message}`);
-            invocation.return_value(new GLib.Variant('(bs)', [false, error.message]));
+            invocation.return_value(new GLib.Variant('(bay)', [false, new Uint8Array(0)]));
         }
     }
 });

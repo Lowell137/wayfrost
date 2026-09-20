@@ -34,42 +34,35 @@ pub fn capture_screen() -> Result<DynamicImage> {
 }
 
 /// Calls org.wayfrost.Capture.CaptureScreen — wayfrost@lowell GNOME extension.
-/// Returns the captured image directly from the temp file the extension wrote.
+/// The extension captures into memory and returns the raw PNG bytes over D-Bus
+/// (`(bay)`), so the sandbox shares no filesystem path with gnome-shell.
 fn capture_via_gnome_extension() -> Result<DynamicImage> {
-    let output = Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.wayfrost.Capture",
-            "--object-path",
+    use gtk4::gio::{self, DBusCallFlags};
+
+    let conn = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
+        .context("no session D-Bus connection")?;
+    let reply = conn
+        .call_sync(
+            Some("org.wayfrost.Capture"),
             "/org/wayfrost/Capture",
-            "--method",
-            "org.wayfrost.Capture.CaptureScreen",
-            "--timeout",
-            "3",
-        ])
-        .output()
-        .context("gdbus call to wayfrost extension failed")?;
+            "org.wayfrost.Capture",
+            "CaptureScreen",
+            None,
+            glib::VariantTy::new("(bay)").ok(),
+            DBusCallFlags::NONE,
+            5000,
+            gio::Cancellable::NONE,
+        )
+        .context("D-Bus call to wayfrost extension failed (is it installed & enabled?)")?;
 
-    anyhow::ensure!(
-        output.status.success(),
-        "wayfrost extension DBus call non-zero"
-    );
+    let ok: bool = reply.child_get(0);
+    anyhow::ensure!(ok, "wayfrost extension reported a capture failure");
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Response format: (true, '/tmp/wayfrost_XXXXXXX.png',)
-    let path = stdout
-        .split('\'')
-        .nth(1)
-        .context("unexpected response from wayfrost extension")?;
+    let data: Vec<u8> = reply.child_get(1);
+    anyhow::ensure!(!data.is_empty(), "wayfrost extension returned an empty image");
 
-    anyhow::ensure!(path.ends_with(".png"), "path doesn't look like png: {path}");
-
-    let img = image::open(path)
-        .with_context(|| format!("Cannot open extension screenshot: {path}"))?;
-    let _ = std::fs::remove_file(path);
-    log::info!("Screen captured via Wayfrost GNOME extension (instant, silent)");
+    let img = image::load_from_memory(&data).context("failed to decode PNG from extension")?;
+    log::info!("Screen captured via Wayfrost GNOME extension (bytes over D-Bus)");
     Ok(img)
 }
 
