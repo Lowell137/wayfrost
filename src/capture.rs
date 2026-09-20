@@ -66,69 +66,98 @@ fn capture_via_gnome_extension() -> Result<DynamicImage> {
     Ok(img)
 }
 
-/// Uses `gdbus` to call org.freedesktop.portal.Screenshot synchronously.
-/// The portal drops the file in ~/Pictures; we read it and clean up.
+/// XDG Desktop Portal Screenshot (interactive) — the extension-free fallback.
+/// Calls org.freedesktop.portal.Screenshot.Screenshot with interactive:true, then
+/// waits for the async org.freedesktop.portal.Request::Response signal on a nested
+/// main loop and reads the returned file URI. GNOME ignores interactive:false
+/// (returns "cancelled"), so this shows the desktop's own region picker.
 fn capture_via_portal() -> Result<DynamicImage> {
-    use std::fs;
-    use std::time::{Duration, Instant, SystemTime};
+    use gtk4::gio::{self, DBusCallFlags, DBusSignalFlags};
+    use glib::prelude::*;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
-    let home = dirs_home()?;
-    let search_dirs = [home.join("Pictures"), home.join("Pictures").join("Screenshots")];
+    let conn = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE)
+        .context("no session D-Bus connection")?;
 
-    let before_mtime = SystemTime::now() - Duration::from_secs(2);
+    let mut options: HashMap<String, glib::Variant> = HashMap::new();
+    options.insert("interactive".to_string(), glib::Variant::from(true));
+    // (s parent_window, a{sv} options)
+    let params = (String::new(), options).to_variant();
 
-    let status = Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.freedesktop.portal.Desktop",
-            "--object-path",
+    // Kick off the request; the reply is the Request object path.
+    let reply = conn
+        .call_sync(
+            Some("org.freedesktop.portal.Desktop"),
             "/org/freedesktop/portal/desktop",
-            "--method",
-            "org.freedesktop.portal.Screenshot.Screenshot",
-            "",
-            "{'interactive': <false>, 'modal': <false>}",
-        ])
-        .status()
-        .context("Failed to invoke gdbus for portal screenshot")?;
+            "org.freedesktop.portal.Screenshot",
+            "Screenshot",
+            Some(&params),
+            glib::VariantTy::new("(o)").ok(),
+            DBusCallFlags::NONE,
+            5000,
+            gio::Cancellable::NONE,
+        )
+        .context("portal Screenshot call failed (no portal backend?)")?;
+    let request_path: String = reply.child_get(0);
 
-    anyhow::ensure!(status.success(), "gdbus portal call returned non-zero exit");
+    // Wait for Request::Response(u, a{sv}) on that path via a nested main loop.
+    let loop_ = glib::MainLoop::new(None, false);
+    let outcome: Arc<Mutex<Option<(u32, String)>>> = Arc::new(Mutex::new(None));
 
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while Instant::now() < deadline {
-        let mut candidates = Vec::new();
-        for dir in &search_dirs {
-            if let Ok(entries) = fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|e| e.to_str()) == Some("png") {
-                        if let Ok(meta) = fs::metadata(&path) {
-                            if meta.len() > 512 {
-                                if let Ok(modified) = meta.modified() {
-                                    if modified > before_mtime {
-                                        candidates.push((modified, path));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+    let cb_loop = loop_.clone();
+    let cb_out = outcome.clone();
+    let sub = conn.signal_subscribe(
+        Some("org.freedesktop.portal.Desktop"),
+        Some("org.freedesktop.portal.Request"),
+        Some("Response"),
+        Some(&request_path),
+        None,
+        DBusSignalFlags::NONE,
+        move |_c, _s, _p, _i, _m, parameters| {
+            let response: u32 = parameters.child_get(0);
+            let results: glib::Variant = parameters.child_get(1);
+            let map: HashMap<String, glib::Variant> = results.get().unwrap_or_default();
+            let uri = map
+                .get("uri")
+                .and_then(|v| v.get::<String>())
+                .unwrap_or_default();
+            *cb_out.lock().unwrap() = Some((response, uri));
+            cb_loop.quit();
+        },
+    );
+
+    // Safety net so a never-responding portal can't hang the main thread forever.
+    let to_loop = loop_.clone();
+    let to_out = outcome.clone();
+    glib::timeout_add_local(Duration::from_secs(60), move || {
+        if to_out.lock().unwrap().is_none() {
+            log::warn!("portal screenshot timed out after 60s");
+            to_loop.quit();
         }
+        glib::ControlFlow::Break
+    });
 
-        candidates.sort_by(|a, b| b.0.cmp(&a.0));
-        for (_, path) in candidates {
-            if let Ok(img) = image::open(&path) {
-                let _ = fs::remove_file(&path);
-                log::info!("Screen captured via XDG Desktop Portal");
-                return Ok(img);
-            }
-        }
+    loop_.run();
+    conn.signal_unsubscribe(sub);
 
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    anyhow::bail!("XDG Desktop Portal screenshot timed out — no valid PNG found in Pictures");
+    let (response, uri) = outcome
+        .lock()
+        .unwrap()
+        .take()
+        .context("portal screenshot produced no response")?;
+    anyhow::ensure!(
+        response == 0,
+        "portal screenshot cancelled or denied (code {response})"
+    );
+
+    let path = uri.strip_prefix("file://").unwrap_or(&uri).to_string();
+    anyhow::ensure!(!path.is_empty(), "portal returned an empty file uri");
+    let img = image::open(&path).with_context(|| format!("cannot open portal screenshot: {path}"))?;
+    let _ = std::fs::remove_file(&path);
+    log::info!("Screen captured via XDG Desktop Portal (interactive)");
+    Ok(img)
 }
 
 fn capture_via_gnome_screenshot() -> Result<DynamicImage> {
@@ -157,10 +186,4 @@ fn capture_via_imagemagick() -> Result<DynamicImage> {
         return Ok(img);
     }
     anyhow::bail!("ImageMagick import failed")
-}
-
-fn dirs_home() -> Result<std::path::PathBuf> {
-    std::env::var("HOME")
-        .map(std::path::PathBuf::from)
-        .context("HOME env var not set")
 }
