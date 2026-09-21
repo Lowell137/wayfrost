@@ -14,13 +14,62 @@ use libadwaita as adw;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use crate::capture;
 use crate::clipboard;
 use crate::ocr::pipeline::{self, DetectedWord};
 
+/// Creates a transparent, fullscreen, focused top-level and pumps the main loop
+/// until it maps (~400ms). The XDG Screenshot portal grants silent interactive:false
+/// capture ONLY to the focused app, and grabs the composited screen — so this surface
+/// must be transparent to let the real desktop show through. Returned window is kept
+/// alive by the caller until after the grab, then destroyed.
+fn spawn_capture_helper(app: &adw::Application) -> gtk::ApplicationWindow {
+    if let Some(display) = gdk::Display::default() {
+        let css = CssProvider::new();
+        css.load_from_data("window.capture-helper { background: transparent; }");
+        gtk4::style_context_add_provider_for_display(
+            &display,
+            &css,
+            gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+
+    let win = gtk::ApplicationWindow::builder()
+        .application(app)
+        .title("Wayfrost")
+        .decorated(false)
+        .resizable(false)
+        .build();
+    win.add_css_class("capture-helper");
+    let blank = DrawingArea::new();
+    blank.set_hexpand(true);
+    blank.set_vexpand(true);
+    blank.set_can_target(false);
+    win.set_child(Some(&blank));
+    win.fullscreen();
+    win.present();
+
+    let loop_ = glib::MainLoop::new(None, false);
+    let l = loop_.clone();
+    glib::timeout_add_local(Duration::from_millis(400), move || {
+        l.quit();
+        glib::ControlFlow::Break
+    });
+    loop_.run();
+    win
+}
+
 pub fn build_overlay_window(app: &adw::Application) {
-    // 1. Capture screen at startup
+    // 1. Present a TRANSPARENT, fullscreen, FOCUSED helper surface so the XDG
+    // Screenshot portal (interactive:false) can silently grab the real desktop.
+    // GNOME denies that call (code 2) unless the requesting app owns the focused
+    // surface; and the surface must be transparent or it would be captured black.
+    // This gives us Flameshot-style capture: no region picker, no shell extension.
+    let helper = spawn_capture_helper(app);
+
+    // 2. Capture screen with the focused surface up.
     let screen_img = match capture::capture_screen() {
         Ok(img) => Some(Arc::new(img)),
         Err(e) => {
@@ -28,6 +77,7 @@ pub fn build_overlay_window(app: &adw::Application) {
             None
         }
     };
+    helper.destroy();
 
     let window = gtk::ApplicationWindow::builder()
         .application(app)
