@@ -4,23 +4,30 @@
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>MIT</project_license>
   <name>Wayfrost</name>
-  <summary>Screen text extractor for Wayland (Live Text / PowerToys-style)</summary>
+  <summary>Select any region on screen and copy its text (Live Text / OCR)</summary>
 
   <description>
     <p>
-      Wayfrost captures a region of your screen and returns the extracted text
-      to your clipboard. It works on GNOME, Hyprland, KDE, and other Wayland
-      compositors through XDG Desktop Portal, optional Wayland-native tools
-      (grim), or a companion GNOME Shell extension for silent instant capture.
+      Wayfrost freezes your screen, lets you drag over any region, and puts the
+      text inside it straight onto your clipboard — like Live Text on macOS or
+      PowerToys Text Extractor on Windows. No files, no cloud, everything stays
+      on your machine.
+    </p>
+    <p>
+      On GNOME and other Wayland desktops it captures silently through the XDG
+      Desktop Portal with no shell extension and no region-picker dialog, and
+      falls back to grim, gnome-screenshot, or an optional companion GNOME Shell
+      extension when those are available.
     </p>
     <p>
       Features:
     </p>
     <ul>
       <li>Full Turkish and English OCR (ç, ğ, ı, ö, ş, ü supported)</li>
-      <li>Two backends: Tesseract (bundled) and PP-OCR ONNX model</li>
+      <li>Two engines: bundled Tesseract and a PP-OCR ONNX model</li>
       <li>2D spatial line clustering for correct reading order</li>
-      <li>Keyboard-first selection, click-drag a region, text lands in clipboard</li>
+      <li>Keyboard-first flow: drag a region, text lands in the clipboard</li>
+      <li>Private by design — runs fully offline</li>
     </ul>
   </description>
 
