@@ -13,12 +13,10 @@ pub fn capture_screen() -> Result<DynamicImage> {
         }
     }
 
-    // 2. XDG Desktop Portal, SILENT (interactive:false) — the extension-free path.
-    // Requires a focused surface, which the overlay presents just before calling.
-    // On GNOME this grabs the real desktop with no region picker and no shell
-    // extension; it returns code 2 (fast) when no window is focused, so the
-    // backends below still cover that case.
-    if let Ok(img) = capture_via_portal() {
+    // 2. XDG Desktop Portal, SILENT (interactive:false) — the extension-free,
+    // picker-free path. Works on recent GNOME (49+); older GNOME returns code 2,
+    // which is why an interactive fallback exists at the end of this chain.
+    if let Ok(img) = capture_via_portal(false) {
         return Ok(img);
     }
 
@@ -38,8 +36,16 @@ pub fn capture_screen() -> Result<DynamicImage> {
         return Ok(img);
     }
 
+    // 6. GUARANTEED fallback: portal interactive (region picker). Works on every
+    // GNOME version without an extension — silent capture failed above, so at
+    // least let the user pick a region and actually get text out.
+    log::info!("No silent backend available; falling back to portal region picker");
+    if let Ok(img) = capture_via_portal(true) {
+        return Ok(img);
+    }
+
     Err(anyhow::anyhow!(
-        "no screen-capture backend worked (portal silent + extension + gnome-screenshot + imagemagick all failed)"
+        "no screen-capture backend worked (portal silent + extension + gnome-screenshot + imagemagick + portal picker all failed)"
     ))
 }
 
@@ -76,14 +82,13 @@ fn capture_via_gnome_extension() -> Result<DynamicImage> {
     Ok(img)
 }
 
-/// Extension-free silent capture: XDG Desktop Portal with interactive:false.
-/// GNOME 45+ DENIES this (code 2) when the calling app has no focused surface, so
-/// the overlay presents a TRANSPARENT, fullscreen, focused helper window before
-/// calling this — the portal then grabs the real desktop (the transparent surface
-/// contributes nothing to the pixels) with no region picker and no shell extension.
-/// The response is a `file://` URI GNOME writes into ~/Pictures/Screenshots, which
-/// the sandbox can read via xdg-pictures.
-fn capture_via_portal() -> Result<DynamicImage> {
+/// Extension-free capture via the XDG Desktop Portal.
+/// `interactive=false` (silent, full-screen) works only on recent GNOME (49+);
+/// older GNOME (46/48) returns code 2 for it. `interactive=true` pops the
+/// desktop's region picker but works on every GNOME version — used as the
+/// guaranteed fallback so capture never dead-ends. The response is a `file://`
+/// URI GNOME writes into ~/Pictures/Screenshots, readable via xdg-pictures.
+fn capture_via_portal(interactive: bool) -> Result<DynamicImage> {
     use gtk4::gio::{self, DBusCallFlags, DBusSignalFlags};
     use glib::prelude::*;
     use std::collections::HashMap;
@@ -94,7 +99,7 @@ fn capture_via_portal() -> Result<DynamicImage> {
         .context("no session D-Bus connection")?;
 
     let mut options: HashMap<String, glib::Variant> = HashMap::new();
-    options.insert("interactive".to_string(), glib::Variant::from(false));
+    options.insert("interactive".to_string(), glib::Variant::from(interactive));
     let params = (String::new(), options).to_variant(); // (s parent_window, a{sv})
 
     let reply = conn
@@ -138,9 +143,10 @@ fn capture_via_portal() -> Result<DynamicImage> {
 
     let to_loop = loop_.clone();
     let to_out = outcome.clone();
-    glib::timeout_add_local(Duration::from_secs(20), move || {
+    let secs = if interactive { 120 } else { 20 };
+    glib::timeout_add_local(Duration::from_secs(secs), move || {
         if to_out.lock().unwrap().is_none() {
-            log::warn!("portal screenshot timed out after 20s");
+            log::warn!("portal screenshot timed out after {secs}s");
             to_loop.quit();
         }
         glib::ControlFlow::Break
@@ -166,7 +172,10 @@ fn capture_via_portal() -> Result<DynamicImage> {
     let img = image::open(&path)
         .with_context(|| format!("cannot open portal screenshot: {}", path.display()))?;
     let _ = std::fs::remove_file(&path);
-    log::info!("Screen captured via XDG Desktop Portal (silent, extension-free)");
+    log::info!(
+        "Screen captured via XDG Desktop Portal ({})",
+        if interactive { "interactive picker" } else { "silent, extension-free" }
+    );
     Ok(img)
 }
 
