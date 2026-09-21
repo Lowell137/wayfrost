@@ -1,24 +1,35 @@
 # Wayfrost
 
-Fast and lightweight native Wayland text extraction tool for GNOME and Wayland compositors (similar to Apple Live Text and Windows PowerToys Text Extractor).
+Fast, lightweight, native text extraction for GNOME and Wayland — grab any region of your screen and the text inside it lands on your clipboard (like Apple Live Text or PowerToys Text Extractor on Windows).
 
-[![English](https://img.shields.io/badge/Language-English-blue)](#english) [![Turkish](https://img.shields.io/badge/Language-Türkçe-red)](#türkçe) [![Website](https://img.shields.io/badge/Website-Live-green)](https://lowell137.github.io/wayfrost/)
+[![Website](https://img.shields.io/badge/Website-Live-green)](https://lowell137.github.io/wayfrost/)
 
-Wayfrost Screenshot  <img width="1920" height="1080" alt="image" src="https://github.com/user-attachments/assets/45ddcd7c-651f-461e-8e8b-13b1138e7123" />
-
+Wayfrost Screenshot  <img width="1920" height="1080" alt="Wayfrost selection overlay" src="https://github.com/user-attachments/assets/45ddcd7c-651f-461e-8e8b-13b1138e7123" />
 
 ---
 
-<a name="english"></a>
-## English
+## Features
 
-### Features
-- Full Turkish and English character recognition (`ç, ğ, ı, ö, ş, ü` and uppercase variants).
-- 2D spatial line clustering ensuring correct reading order without scrambling.
-- Built with GTK4 and Libadwaita.
-- Tesseract `tessdata_best` and ONNX model support.
+- **Silent capture, no setup** — on GNOME/Wayland it grabs the screen through the XDG Desktop Portal with no region-picker dialog and no shell extension required.
+- **Full Turkish and English OCR** — `ç, ğ, ı, ö, ş, ü` and their uppercase variants are recognized correctly.
+- **Correct reading order** — 2D spatial line clustering keeps multi-column text from scrambling.
+- **Two OCR engines** — bundled Tesseract (`tessdata_best`) and a PP-OCR ONNX model.
+- **Private by design** — runs fully offline; nothing leaves your machine.
+- **Native GTK4 / Libadwaita UI.**
 
-### Installation
+## Install
+
+### Flatpak (recommended)
+
+Grab the bundle from the [latest release](https://github.com/Lowell137/wayfrost/releases) and install it:
+
+```bash
+flatpak install -y ./wayfrost.flatpak
+flatpak run io.github.Lowell137.Wayfrost
+```
+
+### From source
+
 Clone the repository and run the automated installation script:
 
 ```bash
@@ -28,27 +39,24 @@ chmod +x install.sh
 ./install.sh
 ```
 
-This script automatically installs required dependencies (GTK4, Libadwaita, Tesseract, Rust) based on your Linux distribution (Arch, Debian/Ubuntu, Fedora), compiles the release binary to `~/.local/bin/wayfrost`, and sets up the `<Super><Shift>t` shortcut.
+The script installs the required dependencies (GTK4, Libadwaita, Tesseract, Rust) for your distribution (Arch, Debian/Ubuntu, Fedora), compiles the release binary to `~/.local/bin/wayfrost`, and sets up the `<Super><Shift>T` shortcut.
 
----
+## Usage
 
-<a name="türkçe"></a>
-## Türkçe
+1. Press `<Super><Shift>T` (or launch the app) — your screen freezes.
+2. Drag over the text you want.
+3. The extracted text is copied to your clipboard automatically.
 
-### Özellikler
-- Türkçe ve İngilizce tam karakter desteği (`ç, ğ, ı, ö, ş, ü` ve büyük harfler).
-- 2D uzaysal satır kümeleme ile bozulmayan, doğru okuma sırası.
-- GTK4 ve Libadwaita tabanlı şık arayüz.
-- Tesseract `tessdata_best` ve ONNX model desteği.
+## How capture works
 
-### Kurulum
-Depoyu klonlayın ve otomatik kurulum scriptini çalıştırın:
+Wayfrost tries several backends in order and uses the first that succeeds:
 
-```bash
-git clone https://github.com/Lowell137/wayfrost.git
-cd wayfrost
-chmod +x install.sh
-./install.sh
-```
+1. `grim` (wlroots compositors)
+2. **XDG Desktop Portal, silent** (`interactive:false`) — the default on GNOME. A transparent, focused helper surface is presented so the portal grabs the real desktop with no picker and no extension.
+3. Optional companion GNOME Shell extension (instant, silent)
+4. `gnome-screenshot`
+5. ImageMagick `import` (X11 / XWayland / VMs)
 
-Bu script dağıtınıza göre (Arch, Debian/Ubuntu, Fedora) eksik paketleri otomatik kurar, binary dosyasını `~/.local/bin/wayfrost` altına derler ve `<Super><Shift>t` kısayolunu tanımlar.
+## License
+
+MIT
