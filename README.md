@@ -2,7 +2,6 @@
 
 Fast, lightweight, native text extraction for GNOME and Wayland — grab any region of your screen and the text inside it lands on your clipboard (like Apple Live Text or PowerToys Text Extractor on Windows).
 
-[![Website](https://img.shields.io/badge/Website-Live-green)](https://lowell137.github.io/wayfrost/)
 
 Wayfrost Screenshot  <img width="1920" height="1080" alt="Wayfrost selection overlay" src="https://github.com/user-attachments/assets/45ddcd7c-651f-461e-8e8b-13b1138e7123" />
 
